@@ -31,6 +31,7 @@ endif ()
 # 公共 API。
 qt_add_executable(UwfCoreBehaviorTests
         CoreBehaviorTests.cpp
+        ../src/app/StartupOptions.cpp
         ../src/util/ByteFormat.cpp
         ../src/util/DriveLetter.cpp
         ../src/util/PathMatch.cpp

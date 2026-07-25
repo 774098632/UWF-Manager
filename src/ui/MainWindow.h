@@ -85,6 +85,11 @@ class MainWindow : public QMainWindow {
   MainWindow(MainWindowServices services, MainWindowStartup startup, QWidget* parent = nullptr);
   ~MainWindow() override;
 
+  // 静默启动入口：在不显示主窗口、不创建任务栏窗口项的前提下完成首轮 UI、
+  // 数据、托盘与 HUB 初始化。首次从托盘/HUB 打开时仍走正常 shown 状态下的
+  // rebuildUi，以维持可见窗口的 polish 与几何稳定性。
+  void startInTray();
+
   // 由"单实例"机制调用：另一个实例被启动时，把本窗口从最小化恢复并带到前台。
   void raiseToFront();
 

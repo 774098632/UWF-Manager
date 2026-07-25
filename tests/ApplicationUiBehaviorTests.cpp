@@ -205,6 +205,7 @@ class ApplicationUiBehaviorTests final : public QObject {
   void safePowerActionsRequireConfirmationAndUseTheInjectedTransport();
   void commitBatchUsesAuthoritativeExistenceForEveryOutcome();
   void uiUtilitiesPreserveDriveComboAndDirtySemantics();
+  void mainWindowQuietStartupInitializesWhileRemainingHidden();
   void mainWindowDistinguishesInitialFailureFromCommittedUnavailableState();
 
  private:
@@ -889,6 +890,32 @@ void ApplicationUiBehaviorTests::uiUtilitiesPreserveDriveComboAndDirtySemantics(
   std::unique_ptr<QWidget> chip(ui::makeSessionChip(QStringLiteral("Current"), QStringLiteral("Current session"), value));
   QCOMPARE(value->parentWidget(), chip.get());
   QCOMPARE(chip->objectName(), QStringLiteral("statusChip"));
+}
+
+void ApplicationUiBehaviorTests::mainWindowQuietStartupInitializesWhileRemainingHidden() {
+  RecordingWmiOperations wmi;
+  MutableApplicationStateSource source;
+  source.disks = {{"C:", "Volume{c}", "NTFS", "System", 1000, 500, core::DiskSupport::Supported}};
+  source.snapshot.uwfAvailable = false;
+  source.snapshot.elevated = true;
+  source.snapshot.unavailableReason = "embedded provider absent";
+
+  ui::MainWindow window({wmi, source},
+                        {.uwfCapability = UwfCapability::Unavailable, .compatibilityMode = false, .osProductName = {}, .osEditionId = {}});
+  window.startInTray();
+
+  QCOMPARE(source.reads, 1);
+  QVERIFY(!window.isVisible());
+  QVERIFY(!window.isMinimized());
+  QVERIFY(window.findChild<QTabWidget*>(QStringLiteral("mainTabs")));
+  QCOMPARE(window.windowOpacity(), 0.0);
+
+  // 只有从托盘、HUB 或第二个进程激活时才映射主窗口；可见 UI 仍在 shown
+  // 状态下完成一次稳定重建，不复用隐藏状态下尚未 polish 的布局。
+  window.raiseToFront();
+  QTRY_COMPARE_WITH_TIMEOUT(source.reads, 2, 1000);
+  QTRY_VERIFY_WITH_TIMEOUT(window.isVisible(), 1000);
+  QTRY_COMPARE_WITH_TIMEOUT(window.windowOpacity(), 1.0, 1000);
 }
 
 void ApplicationUiBehaviorTests::mainWindowDistinguishesInitialFailureFromCommittedUnavailableState() {

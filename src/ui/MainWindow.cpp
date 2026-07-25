@@ -158,6 +158,14 @@ MainWindow::~MainWindow() {
   m_hoverHints = nullptr;
 }
 
+void MainWindow::startInTray() {
+  // 首轮数据必须照常发布给托盘和 HUB，但主窗口不能为了触发 showEvent 而
+  // 短暂映射到桌面。直接在隐藏状态下完成一次完整重建；窗口保持透明，首次
+  // 真正展示时 showEvent 会在 shown 状态下再重建一次，随后统一揭幕。
+  rebuildUi();
+  setWindowOpacity(0.0);
+}
+
 void MainWindow::raiseToFront() { m_chrome->raiseToFront(m_firstShowDone); }
 
 void MainWindow::buildUi() {

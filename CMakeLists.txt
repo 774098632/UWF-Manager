@@ -76,6 +76,8 @@ set(UWF_SOURCES
         src/app/CrashHandler.cpp
         src/app/SecureSingleInstance.h
         src/app/SecureSingleInstance.cpp
+        src/app/StartupOptions.h
+        src/app/StartupOptions.cpp
         src/util/DriveLetter.h
         src/util/DriveLetter.cpp
         src/util/ByteFormat.h

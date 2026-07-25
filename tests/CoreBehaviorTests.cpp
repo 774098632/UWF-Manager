@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "app/StartupOptions.h"
 #include "core/RegistryExclusionPolicy.h"
 #include "core/UwfModel.h"
 #include "ui/Pager.h"
@@ -55,6 +56,7 @@ class CoreBehaviorTests final : public QObject {
   Q_OBJECT
 
  private slots:
+  void startupOptionsRecognizeOnlyTheExactQuietArgument();
   void stringAndDriveNormalization();
   void asciiAndDrivePropertiesCoverTheInputSpace();
   void byteFormattingUsesStableUnitBoundaries();
@@ -79,6 +81,22 @@ class CoreBehaviorTests final : public QObject {
   void comPtrModelsAdoptRetainMovePutAndRelease();
   void registryProtocolNamesAndRootsAreStable();
 };
+
+void CoreBehaviorTests::startupOptionsRecognizeOnlyTheExactQuietArgument() {
+  using uwf::app::StartupMode;
+
+  QCOMPARE(uwf::app::parseStartupOptions({}).mode, StartupMode::Interactive);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe")}).mode, StartupMode::Interactive);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--quiet")}).mode, StartupMode::Quiet);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--other"), QStringLiteral("--quiet")}).mode, StartupMode::Quiet);
+
+  for (const QString& unsupported : {QStringLiteral("--quite"), QStringLiteral("--Quiet"), QStringLiteral("--quiet=true"), QStringLiteral(" --quiet")}) {
+    QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), unsupported}).mode, StartupMode::Interactive);
+  }
+
+  // 首项是可执行文件名，不得被当作用户参数。
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("--quiet")}).mode, StartupMode::Interactive);
+}
 
 struct RefCountedProbe {
   unsigned long refs = 1;

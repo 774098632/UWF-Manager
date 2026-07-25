@@ -15,12 +15,12 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <QApplication>
-
 #include <cstdlib>
 #include <exception>
 
 #include "src/app/CrashHandler.h"
 #include "src/app/SecureSingleInstance.h"
+#include "src/app/StartupOptions.h"
 #include "src/ui/CenteredTextStyle.h"
 #include "src/ui/I18n.h"
 #include "src/ui/MainWindow.h"
@@ -79,8 +79,7 @@ uwf::SystemCheckResult checkRuntimeEnvironment() {
   const auto check = uwf::runSystemChecks();
   switch (check.status) {
     case uwf::CheckStatus::UnsupportedSystem:
-      UWF_LOG_W("main") << "unsupported Windows edition: mode=compatibility product=" << check.productName
-                        << " edition=" << check.editionId;
+      UWF_LOG_W("main") << "unsupported Windows edition: mode=compatibility product=" << check.productName << " edition=" << check.editionId;
       break;
     case uwf::CheckStatus::Ok:
       UWF_LOG_I("main") << "system check completed: product=" << check.productName << " edition=" << check.editionId;
@@ -103,7 +102,13 @@ int runMainWindow(QApplication& app, uwf::app::SecureSingleInstance& singleInsta
   QObject::connect(&singleInstance, &uwf::app::SecureSingleInstance::activationRequested, &w, &uwf::ui::MainWindow::raiseToFront);
   singleInstance.enableActivationNotifications();
 
-  w.show();
+  const auto startupOptions = uwf::app::parseStartupOptions(app.arguments());
+  if (startupOptions.mode == uwf::app::StartupMode::Quiet) {
+    UWF_LOG_I("main") << "startup mode selected: mode=quiet presentation=system-tray";
+    w.startInTray();
+  } else {
+    w.show();
+  }
   return app.exec();
 }
 
