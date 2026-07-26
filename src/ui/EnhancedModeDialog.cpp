@@ -94,7 +94,7 @@ QStringList statusIssues(const service::EnhancedModeStatus& status) {
       if (!(status.*(rule.satisfied))) issues.append(I18n::tr(rule.message));
     }
     if (!status.running) {
-      issues.append(I18n::tr("The service is not running."));
+      if (status.state != service::EnhancedModeState::Stopped) issues.append(I18n::tr("The service is not running."));
     } else if (!status.preshutdownAccepted) {
       issues.append(I18n::tr("The service has not accepted Windows preshutdown notifications."));
     }
@@ -158,9 +158,9 @@ void renderIssueLabel(QLabel& label, const QString& text, const QColor& color) {
   label.setVisible(!text.isEmpty());
   const auto& theme = ThemeManager::instance();
   label.setStyleSheet(
-      QStringLiteral(
-          "QLabel#enhancedModeIssue { color: %1; background: %2; border: 1px solid %1; border-left-width: 3px; border-radius: 8px; padding: 10px 12px; }")
-          .arg(color.name(), translucentBackground(color, theme.isLight() ? 12 : 22)));
+      QStringLiteral("QLabel#enhancedModeIssue { color: %1; background: %2; border: 1px solid %3; border-left: 3px solid %4; "
+                     "border-radius: 8px; padding: 10px 12px; }")
+          .arg(theme.color(Sem::Fg).name(), translucentBackground(color, theme.isLight() ? 10 : 18), theme.color(Sem::Border).name(), color.name()));
 }
 
 QWidget* createChangeRow(QWidget* parent, const int number, const QString& text) {
@@ -189,6 +189,33 @@ QWidget* createChangeRow(QWidget* parent, const int number, const QString& text)
   return row;
 }
 
+QWidget* createNoticeRow(QWidget* parent, const QString& text, const Sem tone = Sem::Warn) {
+  auto* row = new QWidget(parent);
+  auto* layout = new QHBoxLayout(row);
+  layout->setContentsMargins(0, 0, 0, 0);
+  layout->setSpacing(10);
+
+  const auto& theme = ThemeManager::instance();
+  const QColor markerColor = theme.color(tone);
+  auto* marker = new QLabel(QStringLiteral("!"), row);
+  marker->setAlignment(Qt::AlignCenter);
+  marker->setFixedSize(20, 20);
+  QFont markerFont = marker->font();
+  markerFont.setBold(true);
+  marker->setFont(markerFont);
+  marker->setStyleSheet(QStringLiteral("QLabel { color: %1; background: %2; border-radius: 10px; }")
+                            .arg(markerColor.name(), translucentBackground(markerColor, theme.isLight() ? 18 : 30)));
+  layout->addWidget(marker, 0, Qt::AlignTop);
+
+  auto* description = new QLabel(text, row);
+  description->setWordWrap(true);
+  description->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  description->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  description->setStyleSheet(QStringLiteral("color: %1;").arg(theme.color(Sem::FgMuted).name()));
+  layout->addWidget(description, 1);
+  return row;
+}
+
 QFrame* createDivider(QWidget* parent) {
   auto* divider = new QFrame(parent);
   divider->setFrameShape(QFrame::NoFrame);
@@ -205,8 +232,8 @@ EnhancedModeDialog::EnhancedModeDialog(service::EnhancedModeManager& manager, QW
   // 对话框包含会随服务状态出现或消失的故障与操作反馈。建立稳定的初始
   // 几何和足够的纵向余量，让这些内容消耗预留空间，而不是反复触发顶层
   // 窗口按 sizeHint 缩放，造成状态切换时整页跳动。
-  setMinimumSize(700, 610);
-  resize(740, 610);
+  setMinimumSize(700, 660);
+  resize(740, 660);
 
   auto* rootLayout = new QVBoxLayout(this);
   rootLayout->setContentsMargins(26, 24, 26, 18);
@@ -271,11 +298,34 @@ EnhancedModeDialog::EnhancedModeDialog(service::EnhancedModeManager& manager, QW
       disclosure, 3, I18n::tr("Starts UWF Manager automatically after the next Windows startup; moving the executable can break automatic startup")));
   disclosureLayout->addWidget(createDivider(disclosure));
   disclosureLayout->addWidget(createChangeRow(disclosure, 4, I18n::tr("Commits eligible staged files during normal Windows shutdown and restart")));
-  disclosureLayout->addWidget(createDivider(disclosure));
-  disclosureLayout->addWidget(createChangeRow(
-      disclosure, 5,
-      I18n::tr("Registers a service in the system registry when enhanced mode is enabled, so the application no longer remains fully portable")));
   rootLayout->addWidget(disclosure);
+
+  auto* notices = new QFrame(this);
+  notices->setObjectName(QStringLiteral("enhancedModeNotices"));
+  const auto& theme = ThemeManager::instance();
+  const QColor warning = theme.color(Sem::Warn);
+  notices->setStyleSheet(QStringLiteral("QFrame#enhancedModeNotices { background: %1; border: 1px solid %2; border-radius: 8px; }")
+                             .arg(translucentBackground(warning, theme.isLight() ? 7 : 12), theme.color(Sem::Border).name()));
+  auto* noticesLayout = new QVBoxLayout(notices);
+  noticesLayout->setContentsMargins(16, 13, 16, 13);
+  noticesLayout->setSpacing(9);
+  auto* noticesHeading = new QLabel(I18n::tr("Operational and security considerations"), notices);
+  QFont noticesFont = noticesHeading->font();
+  noticesFont.setBold(true);
+  noticesHeading->setFont(noticesFont);
+  noticesLayout->addWidget(noticesHeading);
+  noticesLayout->addWidget(createNoticeRow(
+      notices, I18n::tr("Registers a service in the system registry when enhanced mode is enabled, so the application no longer remains fully portable")));
+  noticesLayout->addWidget(createNoticeRow(
+      notices,
+      I18n::tr("A large number of staged files can significantly extend shutdown or restart; allow UWF Manager enough time to preserve user changes")));
+  noticesLayout->addWidget(createNoticeRow(
+      notices,
+      I18n::tr("Enhanced mode runs this application (UWF Manager) as SYSTEM. If a non-administrator tampers with the application or replaces it with a "
+               "malicious binary, privileges could be elevated to SYSTEM. Enable enhanced mode only from an administrator-protected location "
+               "(recommended location: %ProgramFiles%\\UWF Manager\\Service\\UWF.exe)"),
+      Sem::Danger));
+  rootLayout->addWidget(notices);
 
   m_issueLabel = new QLabel(this);
   m_issueLabel->setObjectName(QStringLiteral("enhancedModeIssue"));
@@ -312,7 +362,15 @@ EnhancedModeDialog::EnhancedModeDialog(service::EnhancedModeManager& manager, QW
   connect(close, &QPushButton::clicked, this, &QDialog::reject);
   connect(m_changeButton, &QPushButton::clicked, this, &EnhancedModeDialog::applyRequestedState);
   connect(m_removeButton, &QPushButton::clicked, this, &EnhancedModeDialog::removeService);
-  connect(&m_manager, &service::EnhancedModeManager::agentConnectionStateChanged, this, [this] { refreshStatus(); });
+  connect(&m_manager, &service::EnhancedModeManager::agentConnectionStateChanged, this, [this](const service::EnhancedModeAgentState state) {
+    if (!m_status) {
+      refreshStatus();
+      return;
+    }
+    auto status = *m_status;
+    status.agentState = state;
+    render(status);
+  });
   rootLayout->addLayout(actions);
 
   refreshStatus();
@@ -329,6 +387,7 @@ void EnhancedModeDialog::refreshStatus() {
 }
 
 void EnhancedModeDialog::render(const service::EnhancedModeStatus& status) {
+  m_status = status;
   m_action = status.availableAction();
   const auto state = statusPresentation(status.state);
   const auto action = actionPresentation(m_action);
@@ -386,6 +445,7 @@ void EnhancedModeDialog::renderOperationFeedback() {
 }
 
 void EnhancedModeDialog::renderStatusUnavailable(const QString& detail) {
+  m_status.reset();
   m_changeButton->setEnabled(false);
   m_removeButton->setEnabled(false);
   renderStatusLabel(*m_statusLabel, {I18n::tr("Enhanced mode status could not be read"), Sem::Danger});

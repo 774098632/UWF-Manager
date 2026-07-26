@@ -88,6 +88,7 @@ function(uwf_configure_target target)
                 "/MANIFEST:NO"
                 "/MANIFESTUAC:NO"
                 /DEBUG:FULL
+                $<$<CONFIG:Release>:/DEPENDENTLOADFLAG:0x800>
                 $<$<CONFIG:Release>:/DYNAMICBASE>
                 $<$<CONFIG:Release>:/HIGHENTROPYVA>
                 $<$<CONFIG:Release>:/NXCOMPAT>

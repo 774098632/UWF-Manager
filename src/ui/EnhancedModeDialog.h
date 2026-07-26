@@ -56,6 +56,7 @@ class EnhancedModeDialog final : public QDialog {
 
   service::EnhancedModeManager& m_manager;
   service::EnhancedModeAction m_action = service::EnhancedModeAction::Enable;
+  std::optional<service::EnhancedModeStatus> m_status;
   std::optional<OperationFeedback> m_operationFeedback;
   QLabel* m_statusLabel = nullptr;
   QLabel* m_issueLabel = nullptr;

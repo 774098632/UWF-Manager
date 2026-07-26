@@ -37,8 +37,6 @@ enum class ApplicationCommandOutcome : std::uint16_t {
   CompletedWithFailures = 2,
   Rejected = 3,
   Failed = 4,
-  ContinuationApproved = 5,
-  PreshutdownReleased = 6,
 };
 
 struct ApplicationCommandResult {
@@ -58,19 +56,8 @@ struct ApplicationCommandResult {
     return result;
   }
 
-  [[nodiscard]] static ApplicationCommandResult releasedPreshutdown(QString detail) {
-    ApplicationCommandResult result;
-    result.outcome = ApplicationCommandOutcome::PreshutdownReleased;
-    result.failedFiles = 1;
-    result.detail = std::move(detail);
-    return result;
-  }
-
   [[nodiscard]] bool completed() const {
     return outcome == ApplicationCommandOutcome::Succeeded || outcome == ApplicationCommandOutcome::CompletedWithFailures;
-  }
-  [[nodiscard]] bool authorizesPreshutdownRelease() const {
-    return completed() || outcome == ApplicationCommandOutcome::ContinuationApproved || outcome == ApplicationCommandOutcome::PreshutdownReleased;
   }
 };
 
@@ -81,20 +68,7 @@ struct ApplicationCommandRequest {
   bool operator==(const ApplicationCommandRequest&) const = default;
 };
 
-struct ApplicationCommandProgress {
-  std::size_t processed = 0;
-  std::size_t total = 0;
-
-  bool operator==(const ApplicationCommandProgress&) const = default;
-};
-
-enum class ApplicationCommandMessageKind {
-  Request,
-  Progress,
-  Result,
-};
-
-// UI 单实例管道和增强模式服务管道共用同一套有界、带版本和请求 ID 的协议。
+// UI 单实例管道使用有界、带版本和请求 ID 的协议。
 // 解码器区分“不完整帧”和“无效帧”：前者等待后续字节，后者直接拒绝连接。
 class ApplicationCommandProtocolError final : public std::runtime_error {
  public:
@@ -102,13 +76,10 @@ class ApplicationCommandProtocolError final : public std::runtime_error {
 };
 
 [[nodiscard]] QByteArray encodeCommandRequest(const ApplicationCommandRequest& request);
-[[nodiscard]] QByteArray encodeCommandProgress(std::uint64_t requestId, const ApplicationCommandProgress& progress);
 [[nodiscard]] QByteArray encodeCommandResult(std::uint64_t requestId, const ApplicationCommandResult& result);
 
 [[nodiscard]] std::optional<ApplicationCommandRequest> decodeCommandRequest(const QByteArray& bytes);
-[[nodiscard]] std::optional<std::pair<std::uint64_t, ApplicationCommandProgress>> decodeCommandProgress(const QByteArray& bytes);
 [[nodiscard]] std::optional<std::pair<std::uint64_t, ApplicationCommandResult>> decodeCommandResult(const QByteArray& bytes);
 [[nodiscard]] std::size_t applicationCommandFrameSize(const QByteArray& bytes);
-[[nodiscard]] ApplicationCommandMessageKind applicationCommandMessageKind(const QByteArray& bytes);
 
 }  // namespace uwf::app

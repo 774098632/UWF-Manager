@@ -18,7 +18,6 @@
 
 #include <windows.h>
 
-#include <QByteArray>
 #include <QScopeGuard>
 #include <algorithm>
 #include <array>
@@ -26,11 +25,13 @@
 #include <exception>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
-#include <utility>
+#include <system_error>
 #include <vector>
 
 #include "../util/Log.h"
+#include "EnhancedModePipeIo.h"
 #include "EnhancedModeService.h"
 
 namespace uwf::service {
@@ -42,6 +43,7 @@ constexpr auto kReconnectMaximumDelay = std::chrono::seconds{5};
 constexpr auto kConnectionFailureGrace = std::chrono::seconds{1};
 constexpr auto kHandshakeTimeout = std::chrono::seconds{2};
 constexpr auto kHandshakePollInterval = std::chrono::milliseconds{25};
+constexpr auto kControlAcknowledgementTimeout = std::chrono::seconds{2};
 
 class UniqueHandle final {
  public:
@@ -100,18 +102,7 @@ bool isLocalSystemServiceProcess(const DWORD processId) {
   return EqualSid(reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid, localSystem) != FALSE;
 }
 
-bool writeAll(const HANDLE pipe, const QByteArray& bytes) {
-  qsizetype offset = 0;
-  while (offset < bytes.size()) {
-    DWORD written = 0;
-    const DWORD requested = static_cast<DWORD>(bytes.size() - offset);
-    if (!WriteFile(pipe, bytes.constData() + offset, requested, &written, nullptr) || written == 0) return false;
-    offset += static_cast<qsizetype>(written);
-  }
-  return true;
-}
-
-bool readAgentHandshake(const HANDLE pipe, const std::stop_token stopToken) {
+bool readAgentHandshake(const HANDLE pipe, const HANDLE stopEvent, const std::stop_token stopToken) {
   std::array<char, kEnhancedAgentHandshake.size()> received{};
   std::size_t offset = 0;
   const auto deadline = std::chrono::steady_clock::now() + kHandshakeTimeout;
@@ -124,33 +115,32 @@ bool readAgentHandshake(const HANDLE pipe, const std::stop_token stopToken) {
       continue;
     }
 
-    DWORD count = 0;
-    const DWORD requested = std::min(available, static_cast<DWORD>(received.size() - offset));
-    if (!ReadFile(pipe, received.data() + offset, requested, &count, nullptr) || count == 0) return false;
-    offset += static_cast<std::size_t>(count);
+    const auto requested = static_cast<std::size_t>(std::min(available, static_cast<DWORD>(received.size() - offset)));
+    auto remaining = std::as_writable_bytes(std::span{received}).subspan(offset, requested);
+    if (readEnhancedPipe(pipe, remaining, stopEvent) != EnhancedPipeIoResult::Completed) return false;
+    offset += requested;
   }
   return !stopToken.stop_requested() && received == kEnhancedAgentHandshake;
 }
 
-std::optional<QByteArray> readFrame(const HANDLE pipe) {
-  QByteArray bytes;
-  std::array<char, 4096> chunk{};
-  std::size_t expected = 0;
-  for (;;) {
-    DWORD count = 0;
-    if (!ReadFile(pipe, chunk.data(), static_cast<DWORD>(chunk.size()), &count, nullptr) || count == 0) return std::nullopt;
-    bytes.append(chunk.data(), static_cast<qsizetype>(count));
-    if (expected == 0) expected = app::applicationCommandFrameSize(bytes);
-    if (expected != 0 && static_cast<std::size_t>(bytes.size()) >= expected) {
-      if (static_cast<std::size_t>(bytes.size()) != expected) return std::nullopt;
-      return bytes;
-    }
-  }
-}
-
 }  // namespace
 
-EnhancedModeAgent::EnhancedModeAgent(QObject* parent) : EnhancedModeAgentConnection(parent) {}
+struct EnhancedModeAgent::ControlChannel {
+  ControlChannel() : stopEvent(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
+    if (!stopEvent.valid()) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "create enhanced mode agent stop event");
+  }
+
+  std::mutex stateMutex;
+  std::mutex requestMutex;
+  std::condition_variable changed;
+  UniqueHandle stopEvent;
+  HANDLE pipe = nullptr;
+  std::uint64_t generation = 0;
+  std::uint64_t nextRequestId = 1;
+  std::optional<EnhancedAgentControlMessage> lastAcknowledgement;
+};
+
+EnhancedModeAgent::EnhancedModeAgent(QObject* parent) : EnhancedModeAgentConnection(parent), m_control(std::make_unique<ControlChannel>()) {}
 
 EnhancedModeAgent::~EnhancedModeAgent() { stop(); }
 
@@ -159,6 +149,7 @@ void EnhancedModeAgent::start() {
     if (m_workerActive.load(std::memory_order_acquire)) return;
     m_thread.join();
   }
+  ResetEvent(m_control->stopEvent.get());
   m_workerActive.store(true, std::memory_order_release);
   try {
     m_thread = std::jthread([this](const std::stop_token stopToken) {
@@ -166,10 +157,10 @@ void EnhancedModeAgent::start() {
       try {
         run(stopToken);
       } catch (const std::exception& error) {
-        UWF_LOG_E("service") << "enhanced mode agent stopped unexpectedly: error=" << error.what();
+        UWF_LOG_E("service") << "enhanced mode identity agent stopped unexpectedly: error=" << error.what();
         if (!stopToken.stop_requested()) emit connectionStateChanged(false);
       } catch (...) {
-        UWF_LOG_E("service") << "enhanced mode agent stopped unexpectedly: error=non-standard-exception";
+        UWF_LOG_E("service") << "enhanced mode identity agent stopped unexpectedly: error=non-standard-exception";
         if (!stopToken.stop_requested()) emit connectionStateChanged(false);
       }
     });
@@ -182,41 +173,47 @@ void EnhancedModeAgent::start() {
 void EnhancedModeAgent::stop() {
   if (!m_thread.joinable()) return;
   m_thread.request_stop();
-  m_responseReady.notify_all();
-  CancelSynchronousIo(reinterpret_cast<HANDLE>(m_thread.native_handle()));
+  SetEvent(m_control->stopEvent.get());
+  m_waitChanged.notify_all();
+  m_control->changed.notify_all();
   m_thread.join();
   m_workerActive.store(false, std::memory_order_release);
-  std::scoped_lock lock(m_mutex);
-  m_activeRequestId.reset();
-  m_response.reset();
-  m_progress.reset();
 }
 
 bool EnhancedModeAgent::running() const { return m_workerActive.load(std::memory_order_acquire); }
 
+bool EnhancedModeAgent::markPreshutdownCommitHandled() { return sendControl(EnhancedAgentControl::PreshutdownCommitHandled); }
+
+bool EnhancedModeAgent::requirePreshutdownCommit() { return sendControl(EnhancedAgentControl::PreshutdownCommitRequired); }
+
+bool EnhancedModeAgent::sendControl(const EnhancedAgentControl control) {
+  std::scoped_lock requestLock(m_control->requestMutex);
+  HANDLE rawDuplicate = nullptr;
+  std::uint64_t generation = 0;
+  EnhancedAgentControlMessage request;
+  {
+    std::scoped_lock stateLock(m_control->stateMutex);
+    if (!m_control->pipe) return false;
+    if (!DuplicateHandle(GetCurrentProcess(), m_control->pipe, GetCurrentProcess(), &rawDuplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) return false;
+    generation = m_control->generation;
+    request.control = control;
+    request.requestId = m_control->nextRequestId;
+    m_control->nextRequestId = request.requestId == std::numeric_limits<std::uint64_t>::max() ? 1 : request.requestId + 1;
+  }
+  const UniqueHandle pipe(rawDuplicate);
+  const auto frame = encodeEnhancedAgentControl(request);
+  if (writeEnhancedPipe(pipe.get(), std::as_bytes(std::span{frame}), m_control->stopEvent.get()) != EnhancedPipeIoResult::Completed) return false;
+
+  std::unique_lock stateLock(m_control->stateMutex);
+  const bool acknowledged = m_control->changed.wait_for(stateLock, kControlAcknowledgementTimeout,
+                                                        [&] { return m_control->generation != generation || m_control->lastAcknowledgement == request; });
+  return acknowledged && m_control->generation == generation && m_control->lastAcknowledgement == request;
+}
+
 bool EnhancedModeAgent::waitBeforeReconnect(const std::stop_token stopToken, const std::chrono::milliseconds delay) {
-  std::unique_lock lock(m_mutex);
-  m_responseReady.wait_for(lock, delay, [&] { return stopToken.stop_requested(); });
+  std::unique_lock lock(m_waitMutex);
+  m_waitChanged.wait_for(lock, delay, [&] { return stopToken.stop_requested(); });
   return !stopToken.stop_requested();
-}
-
-void EnhancedModeAgent::complete(const std::uint64_t requestId, const app::ApplicationCommandResult& result) {
-  {
-    std::scoped_lock lock(m_mutex);
-    if (m_activeRequestId != requestId) return;
-    m_response = Response{requestId, result};
-  }
-  m_responseReady.notify_all();
-}
-
-void EnhancedModeAgent::reportProgress(const std::uint64_t requestId, const std::size_t processed, const std::size_t total) {
-  {
-    std::scoped_lock lock(m_mutex);
-    if (m_activeRequestId != requestId) return;
-    // 只保留尚未发送的最新进度；最终结果仍单独排队，绝不会被进度覆盖。
-    m_progress = std::pair{requestId, app::ApplicationCommandProgress{processed, total}};
-  }
-  m_responseReady.notify_all();
 }
 
 void EnhancedModeAgent::run(const std::stop_token stopToken) {
@@ -237,12 +234,8 @@ void EnhancedModeAgent::run(const std::stop_token stopToken) {
   };
 
   while (!stopToken.stop_requested()) {
-    if (!WaitNamedPipeW(kEnhancedPipeName, 1000)) {
-      if (!waitForRetry()) return;
-      continue;
-    }
     constexpr DWORD kSecurityFlags = SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | SECURITY_EFFECTIVE_ONLY;
-    UniqueHandle pipe(CreateFileW(kEnhancedPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, kSecurityFlags, nullptr));
+    UniqueHandle pipe(CreateFileW(kEnhancedPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, kSecurityFlags | FILE_FLAG_OVERLAPPED, nullptr));
     if (!pipe.valid()) {
       if (!waitForRetry()) return;
       continue;
@@ -250,68 +243,55 @@ void EnhancedModeAgent::run(const std::stop_token stopToken) {
 
     ULONG serverProcessId = 0;
     if (!GetNamedPipeServerProcessId(pipe.get(), &serverProcessId) || !isLocalSystemServiceProcess(static_cast<DWORD>(serverProcessId))) {
-      UWF_LOG_W("service") << "enhanced mode pipe rejected: reason=untrusted-server";
+      UWF_LOG_W("service") << "enhanced mode identity pipe rejected: reason=untrusted-server";
       if (!waitForRetry()) return;
       continue;
     }
-    if (!readAgentHandshake(pipe.get(), stopToken)) {
+    if (!readAgentHandshake(pipe.get(), m_control->stopEvent.get(), stopToken)) {
       if (!waitForRetry()) return;
       continue;
     }
+
     retryDelay = kReconnectInitialDelay;
     disconnectedPublished = false;
-    emit connectionStateChanged(true);
-
-    while (!stopToken.stop_requested()) {
-      try {
-        const auto bytes = readFrame(pipe.get());
-        if (!bytes) break;
-        const auto request = app::decodeCommandRequest(*bytes);
-        if (!request || request->kind != app::ApplicationCommandKind::CommitStage) break;
-
+    {
+      {
+        std::scoped_lock lock(m_control->stateMutex);
+        m_control->pipe = pipe.get();
+        m_control->lastAcknowledgement.reset();
+        ++m_control->generation;
+      }
+      m_control->changed.notify_all();
+      const auto releasePublishedPipe = qScopeGuard([this, handle = pipe.get()] {
         {
-          std::scoped_lock lock(m_mutex);
-          m_activeRequestId = request->requestId;
-          m_response.reset();
-          m_progress.reset();
+          std::scoped_lock lock(m_control->stateMutex);
+          if (m_control->pipe != handle) return;
+          m_control->pipe = nullptr;
+          m_control->lastAcknowledgement.reset();
+          ++m_control->generation;
         }
-        const auto releaseRequest = qScopeGuard([this, requestId = request->requestId] {
-          std::scoped_lock lock(m_mutex);
-          if (m_activeRequestId != requestId) return;
-          m_activeRequestId.reset();
-          m_response.reset();
-          m_progress.reset();
-        });
-        emit commitStageRequested(request->requestId);
+        m_control->changed.notify_all();
+      });
+      emit connectionStateChanged(true);
 
-        bool requestCompleted = false;
-        while (!stopToken.stop_requested() && !requestCompleted) {
-          std::unique_lock lock(m_mutex);
-          m_responseReady.wait(lock, [&] {
-            return stopToken.stop_requested() || (m_response && m_response->requestId == request->requestId) ||
-                   (m_progress && m_progress->first == request->requestId);
-          });
-          if (stopToken.stop_requested()) break;
-          if (m_response && m_response->requestId == request->requestId) {
-            const auto response = std::move(*m_response);
-            m_response.reset();
-            m_progress.reset();
-            lock.unlock();
-            requestCompleted = writeAll(pipe.get(), app::encodeCommandResult(response.requestId, response.result));
-            if (!requestCompleted) break;
-            continue;
-          }
-          const auto progress = std::move(*m_progress);
-          m_progress.reset();
-          lock.unlock();
-          if (!writeAll(pipe.get(), app::encodeCommandProgress(progress.first, progress.second))) break;
+      // 连接平时只维持身份；安全电源流程会在 UI 完成预提交后发送带请求 ID
+      // 的控制帧，服务原样确认一次性 PRESHUTDOWN 令牌的状态。
+      for (;;) {
+        EnhancedAgentControlFrame frame{};
+        if (readEnhancedPipe(pipe.get(), std::as_writable_bytes(std::span{frame}), m_control->stopEvent.get()) != EnhancedPipeIoResult::Completed) break;
+        const auto acknowledgement = decodeEnhancedAgentControl(frame);
+        if (!acknowledgement) {
+          UWF_LOG_W("service") << "enhanced mode identity channel rejected invalid control acknowledgement";
+          break;
         }
-        if (!requestCompleted) break;
-      } catch (const std::exception& error) {
-        UWF_LOG_W("service") << "enhanced mode agent protocol failed: error=" << error.what();
-        break;
+        {
+          std::scoped_lock lock(m_control->stateMutex);
+          m_control->lastAcknowledgement = *acknowledgement;
+        }
+        m_control->changed.notify_all();
       }
     }
+    if (stopToken.stop_requested()) return;
     disconnectedPublished = true;
     emit connectionStateChanged(false);
     if (!waitForRetry()) return;

@@ -22,18 +22,17 @@
 #include <wtsapi32.h>
 // clang-format on
 
-#include <QByteArray>
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -42,8 +41,12 @@
 #include <utility>
 #include <vector>
 
-#include "../app/ApplicationCommand.h"
+#include "../app/FileStagingStore.h"
 #include "../util/Log.h"
+#include "../uwf/FileStagingTask.h"
+#include "../uwf/UwfSnapshot.h"
+#include "../uwf/wmi/WmiClient.h"
+#include "EnhancedModePipeIo.h"
 #include "EnhancedModeService.h"
 
 namespace uwf::service {
@@ -55,15 +58,8 @@ constexpr auto kServiceHeartbeatInterval = std::chrono::seconds{15};
 constexpr auto kAgentStartupGrace = std::chrono::seconds{30};
 constexpr auto kAgentRetryInitial = std::chrono::seconds{5};
 constexpr auto kAgentRetryMaximum = std::chrono::seconds{60};
-constexpr auto kOrchestrationRetryDelay = std::chrono::seconds{1};
-// PRESHUTDOWN 不能成为永久关机屏障。五分钟约束“始终无法形成一次可用
-// 代理请求”的基础设施故障；代理持续上报进度时，每条有效帧重新获得完整的
-// 空闲窗口，但整个编排仍受独立的绝对上限约束。三十分钟远高于普通关机钩子
-// 的默认窗口，同时保证损坏的代理或异常大的目录不能永久阻止系统关机。
-constexpr auto kPreshutdownInfrastructureDeadline = std::chrono::minutes{5};
-constexpr auto kAgentResponseIdleTimeout = std::chrono::minutes{5};
-constexpr auto kPreshutdownMaximumDuration = std::chrono::minutes{30};
-constexpr auto kPipePollInterval = std::chrono::milliseconds{100};
+constexpr auto kCommitPreparationPollInterval = std::chrono::milliseconds{16};
+constexpr auto kPreshutdownSkipLifetime = std::chrono::minutes{5};
 
 class UniqueHandle final {
  public:
@@ -310,69 +306,13 @@ LaunchedAgent launchInteractiveAgent() {
   return {std::move(processHandle), process.dwProcessId, sessionId};
 }
 
-bool writeAll(const HANDLE pipe, const QByteArray& bytes) {
-  qsizetype offset = 0;
-  while (offset < bytes.size()) {
-    DWORD written = 0;
-    const DWORD requested = static_cast<DWORD>(bytes.size() - offset);
-    if (!WriteFile(pipe, bytes.constData() + offset, requested, &written, nullptr) || written == 0) return false;
-    offset += static_cast<qsizetype>(written);
-  }
-  return true;
-}
-
-class PipeFrameReader final {
- public:
-  [[nodiscard]] std::optional<QByteArray> read(const HANDLE pipe, const HANDLE process, const HANDLE released, const HANDLE stopEvent,
-                                               const std::chrono::steady_clock::time_point deadline) {
-    for (;;) {
-      const std::size_t expected = app::applicationCommandFrameSize(m_buffer);
-      if (expected != 0 && static_cast<std::size_t>(m_buffer.size()) >= expected) {
-        QByteArray frame = m_buffer.left(static_cast<qsizetype>(expected));
-        m_buffer.remove(0, static_cast<qsizetype>(expected));
-        return frame;
-      }
-
-      if (std::chrono::steady_clock::now() >= deadline) {
-        throw std::runtime_error("enhanced mode UI agent response timed out");
-      }
-
-      DWORD available = 0;
-      if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) return std::nullopt;
-      if (available == 0) {
-        const HANDLE events[] = {stopEvent, process, released};
-        const DWORD wait = WaitForMultipleObjects(3, events, FALSE, static_cast<DWORD>(kPipePollInterval.count()));
-        if (wait == WAIT_OBJECT_0 || wait == WAIT_OBJECT_0 + 1 || wait == WAIT_OBJECT_0 + 2) return std::nullopt;
-        if (wait == WAIT_TIMEOUT) continue;
-        throwSystemError("wait for enhanced mode agent response");
-      }
-
-      std::array<char, 4096> chunk{};
-      DWORD count = 0;
-      const DWORD requested = std::min<DWORD>(available, static_cast<DWORD>(chunk.size()));
-      if (!ReadFile(pipe, chunk.data(), requested, &count, nullptr) || count == 0) return std::nullopt;
-      m_buffer.append(chunk.data(), static_cast<qsizetype>(count));
-    }
-  }
-
- private:
-  QByteArray m_buffer;
-};
-
 struct AgentConnection {
   AgentConnection(UniqueHandle pipeHandle, AuthenticatedAgent identity)
-      : pipe(std::move(pipeHandle)),
-        processId(identity.processId),
-        sessionId(identity.sessionId),
-        process(std::move(identity.process)),
-        released(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
-    if (!released.valid()) throwSystemError("create enhanced mode agent release event");
-  }
+      : pipe(std::move(pipeHandle)), processId(identity.processId), sessionId(identity.sessionId), process(std::move(identity.process)) {}
   UniqueHandle pipe;
   DWORD processId = 0;
   DWORD sessionId = 0;
   UniqueHandle process;
-  UniqueHandle released;
 };
 
 enum class AgentLaunchObservation {
@@ -383,16 +323,24 @@ enum class AgentLaunchObservation {
   ServiceStopping,
 };
 
-enum class AgentSessionScope {
-  ActiveInteractive,
-  AnyAuthenticated,
-};
-
 struct AgentLaunchResult {
   AgentLaunchObservation observation = AgentLaunchObservation::TimedOut;
   DWORD processId = 0;
   DWORD exitCode = STILL_ACTIVE;
 };
+
+FileStagingCommitResult commitStagedFiles() {
+  // WMI session 是 thread_local；在实际执行提交的工作线程内创建并销毁该线程
+  // 的 COM/WMI 上下文，避免跨线程借用 UI 或服务主线程的 COM apartment。
+  initializeWmiRuntime();
+  auto& session = embeddedWmiSession();
+  const auto capability = probeUwfCapability(session);
+  app::RegistryFileStagingStore store(session, capability);
+  FileStagingTask task(session, store, capability);
+  while (!task.pollPreparation()) std::this_thread::sleep_for(kCommitPreparationPollInterval);
+  while (!task.finished()) static_cast<void>(task.advance());
+  return task.result();
+}
 
 class ServiceRuntime final {
  public:
@@ -448,9 +396,15 @@ class ServiceRuntime final {
 
       const HANDLE events[] = {m_stopEvent.get(), m_preshutdownEvent.get()};
       const DWORD wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
-      if (wait == WAIT_OBJECT_0 + 1) runPreshutdownCommit();
       if (wait != WAIT_OBJECT_0 && wait != WAIT_OBJECT_0 + 1) throwSystemError("wait for enhanced mode service shutdown");
-      stopInfrastructure();
+      if (wait == WAIT_OBJECT_0 + 1) {
+        // 关机提交不依赖交互会话。先关闭 UI 身份基础设施，防止服务在关机阶段
+        // 启动或等待 UI，再由本服务进程内的工作线程独立完成整个批次。
+        stopInfrastructure();
+        runPreshutdownCommit();
+      } else {
+        stopInfrastructure();
+      }
       reportStopped(m_stopExitCode.load(std::memory_order_acquire));
     } catch (...) {
       if (m_stopEvent.valid()) SetEvent(m_stopEvent.get());
@@ -546,29 +500,36 @@ class ServiceRuntime final {
     SECURITY_ATTRIBUTES security{sizeof(security), descriptor.get(), FALSE};
 
     while (!stopToken.stop_requested()) {
-      UniqueHandle pipe(CreateNamedPipeW(kEnhancedPipeName, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1,
-                                         64 * 1024, 64 * 1024, 0, &security));
+      // 逻辑上仍只接受一个已认证代理，但原生管道实例的寿命可能略长于逻辑
+      // 连接：监督线程持有的 shared_ptr 会让刚断开的 HANDLE 延迟关闭。允许
+      // 退场实例与下一监听实例短暂重叠，不能把正常 UI 退出误判成
+      // ERROR_PIPE_BUSY 并停止整个服务。
+      UniqueHandle pipe(CreateNamedPipeW(kEnhancedPipeName, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                                         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 64 * 1024,
+                                         64 * 1024, 0, &security));
       if (!pipe.valid()) {
         stopForInfrastructureFailure("create enhanced mode agent pipe", GetLastError());
         return;
       }
 
-      const BOOL connected = ConnectNamedPipe(pipe.get(), nullptr) || GetLastError() == ERROR_PIPE_CONNECTED;
-      if (!connected) {
-        const DWORD error = GetLastError();
-        if (stopToken.stop_requested()) return;
-        if (error == ERROR_NO_DATA) continue;
-        stopForInfrastructureFailure("accept enhanced mode agent connection", error);
+      const auto connectionResult = connectEnhancedPipe(pipe.get(), m_stopEvent.get());
+      if (connectionResult == EnhancedPipeIoResult::Stopped || stopToken.stop_requested()) {
+        DisconnectNamedPipe(pipe.get());
         return;
       }
+      if (connectionResult == EnhancedPipeIoResult::Disconnected) continue;
       if (stopToken.stop_requested()) return;
       auto identity = authenticateAgent(pipe.get());
       if (!identity) {
         DisconnectNamedPipe(pipe.get());
         continue;
       }
-      const QByteArray handshake(kEnhancedAgentHandshake.data(), static_cast<qsizetype>(kEnhancedAgentHandshake.size()));
-      if (!writeAll(pipe.get(), handshake)) {
+      const auto handshakeResult = writeEnhancedPipe(pipe.get(), std::as_bytes(std::span{kEnhancedAgentHandshake}), m_stopEvent.get());
+      if (handshakeResult == EnhancedPipeIoResult::Stopped) {
+        DisconnectNamedPipe(pipe.get());
+        return;
+      }
+      if (handshakeResult == EnhancedPipeIoResult::Disconnected) {
         DisconnectNamedPipe(pipe.get());
         continue;
       }
@@ -579,20 +540,24 @@ class ServiceRuntime final {
         m_connection = connection;
         SetEvent(m_agentConnectedEvent.get());
       }
-      m_connectionChanged.notify_all();
 
-      // 不轮询 UI 进程。进程句柄在退出时由内核置为有信号；released 则覆盖
-      // 协议失败主动丢弃连接的场景。任一事件都立即释放旧实例并重新创建监听，
-      // 让用户关闭 UI 后再次启动的新进程可以重新完成认证。
-      const HANDLE events[] = {m_stopEvent.get(), connection->process.get(), connection->released.get()};
-      const DWORD wait = WaitForMultipleObjects(3, events, FALSE, INFINITE);
-      if (wait == WAIT_OBJECT_0) return;
-      if (wait == WAIT_OBJECT_0 + 1 || wait == WAIT_OBJECT_0 + 2) {
-        discardConnection(connection);
-        continue;
+      // 管道不承载 UWF 任务；唯一控制消息是安全电源流程在完成 UI 预提交后
+      // 武装或撤销一次性 PRESHUTDOWN 跳过令牌。服务原样回显包含请求 ID
+      // 的控制帧，确保 UI 不会把延迟确认误认成下一次请求的结果。
+      for (;;) {
+        EnhancedAgentControlFrame frame{};
+        const auto readResult = readEnhancedPipe(connection->pipe.get(), std::as_writable_bytes(std::span{frame}), m_stopEvent.get());
+        if (readResult != EnhancedPipeIoResult::Completed) break;
+        const auto message = decodeEnhancedAgentControl(frame);
+        if (!message) {
+          UWF_LOG_W("service") << "enhanced mode identity channel rejected invalid client control";
+          break;
+        }
+        applyPreshutdownControl(message->control);
+        if (writeEnhancedPipe(connection->pipe.get(), std::as_bytes(std::span{frame}), m_stopEvent.get()) != EnhancedPipeIoResult::Completed) break;
       }
-      stopForInfrastructureFailure("wait for enhanced mode agent lifetime", GetLastError());
-      return;
+      discardConnection(connection);
+      if (stopToken.stop_requested() || WaitForSingleObject(m_stopEvent.get(), 0) == WAIT_OBJECT_0) return;
     }
   }
 
@@ -601,9 +566,7 @@ class ServiceRuntime final {
     bool delayBeforeLaunch = false;
 
     while (!stopToken.stop_requested()) {
-      const auto sessionScope =
-          m_preshutdownStarted.load(std::memory_order_acquire) ? AgentSessionScope::AnyAuthenticated : AgentSessionScope::ActiveInteractive;
-      if (retainHealthyAgent(sessionScope)) {
+      if (retainHealthyAgent()) {
         retryDelay = kAgentRetryInitial;
         delayBeforeLaunch = false;
         const HANDLE events[] = {m_stopEvent.get(), m_agentNeededEvent.get()};
@@ -666,7 +629,7 @@ class ServiceRuntime final {
     }
   }
 
-  bool retainHealthyAgent(const AgentSessionScope sessionScope) {
+  bool retainHealthyAgent() {
     std::shared_ptr<AgentConnection> connection;
     {
       std::scoped_lock lock(m_connectionMutex);
@@ -674,7 +637,7 @@ class ServiceRuntime final {
     }
     if (!connection) return false;
     DWORD available = 0;
-    const bool sessionMatches = sessionScope == AgentSessionScope::AnyAuthenticated || connection->sessionId == activeInteractiveSessionId();
+    const bool sessionMatches = connection->sessionId == activeInteractiveSessionId();
     const bool processAlive = WaitForSingleObject(connection->process.get(), 0) == WAIT_TIMEOUT;
     if (processAlive && sessionMatches && PeekNamedPipe(connection->pipe.get(), nullptr, 0, nullptr, &available, nullptr)) return true;
     discardConnection(connection);
@@ -684,9 +647,7 @@ class ServiceRuntime final {
   AgentLaunchResult observeLaunchedAgent(const LaunchedAgent& launched) {
     const auto deadline = std::chrono::steady_clock::now() + kAgentStartupGrace;
     for (;;) {
-      const auto sessionScope =
-          m_preshutdownStarted.load(std::memory_order_acquire) ? AgentSessionScope::AnyAuthenticated : AgentSessionScope::ActiveInteractive;
-      if (auto connection = currentConnection(); connection && retainHealthyAgent(sessionScope)) {
+      if (auto connection = currentConnection(); connection && retainHealthyAgent()) {
         return {AgentLaunchObservation::Connected, connection->processId, STILL_ACTIVE};
       }
 
@@ -734,191 +695,90 @@ class ServiceRuntime final {
     if (m_stopEvent.valid()) SetEvent(m_stopEvent.get());
   }
 
-  std::shared_ptr<AgentConnection> waitForAgent(const std::chrono::steady_clock::duration grace) {
-    // PRESHUTDOWN 期间活动会话可能先于服务收尾发生切换。已经通过认证且管道
-    // 仍健康的代理必须保留到批次结束，不能因为会话状态抖动中途拆掉它。
-    if (retainHealthyAgent(AgentSessionScope::AnyAuthenticated)) return currentConnection();
-    SetEvent(m_agentNeededEvent.get());
-    std::unique_lock lock(m_connectionMutex);
-    m_connectionChanged.wait_for(lock, grace, [&] { return static_cast<bool>(m_connection); });
-    return m_connection;
-  }
-
   void discardConnection(const std::shared_ptr<AgentConnection>& connection) {
     std::scoped_lock lock(m_connectionMutex);
     if (m_connection == connection) {
+      CancelIoEx(connection->pipe.get(), nullptr);
       DisconnectNamedPipe(connection->pipe.get());
       m_connection.reset();
       ResetEvent(m_agentConnectedEvent.get());
-      SetEvent(connection->released.get());
-      m_connectionChanged.notify_all();
     }
   }
 
-  [[nodiscard]] bool stopRequested() const {
-    const DWORD wait = WaitForSingleObject(m_stopEvent.get(), 0);
-    if (wait == WAIT_OBJECT_0) return true;
-    if (wait == WAIT_TIMEOUT) return false;
-    throwSystemError("inspect enhanced mode service stop event");
-  }
-
-  [[nodiscard]] bool waitForRetryOrStop(const std::chrono::steady_clock::duration duration) const {
-    const auto milliseconds = std::chrono::ceil<std::chrono::milliseconds>(duration);
-    const auto timeout = static_cast<DWORD>(std::min<std::int64_t>(milliseconds.count(), std::numeric_limits<DWORD>::max()));
-    const DWORD wait = WaitForSingleObject(m_stopEvent.get(), timeout);
-    if (wait == WAIT_OBJECT_0) return true;
-    if (wait == WAIT_TIMEOUT) return false;
-    throwSystemError("wait for enhanced mode orchestration retry");
-  }
-
-  app::ApplicationCommandResult requestStagedCommit() {
-    const auto startedAt = std::chrono::steady_clock::now();
-    const auto infrastructureDeadline = startedAt + kPreshutdownInfrastructureDeadline;
-    const auto absoluteDeadline = startedAt + kPreshutdownMaximumDuration;
-    std::uint64_t attempt = 0;
-    QString lastFailure = QStringLiteral("no authenticated UI agent became available");
-    while (std::chrono::steady_clock::now() < std::min(infrastructureDeadline, absoluteDeadline)) {
-      if (stopRequested()) {
-        return app::ApplicationCommandResult::releasedPreshutdown(
-            QStringLiteral("automatic file staging was released because the enhanced mode service infrastructure stopped"));
-      }
-      ++attempt;
-      reportRealProgress();
-      const auto remaining = std::min(infrastructureDeadline, absoluteDeadline) - std::chrono::steady_clock::now();
-      auto connection = waitForAgent(std::min<std::chrono::steady_clock::duration>(kAgentStartupGrace, remaining));
-      if (!connection) {
-        UWF_LOG_W("service") << "enhanced mode staged commit has no authenticated UI agent: attempt=" << attempt;
-        lastFailure = QStringLiteral("no authenticated UI agent became available");
-        continue;
-      }
-      try {
-        const std::uint64_t requestId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
-        if (!writeAll(connection->pipe.get(), app::encodeCommandRequest({app::ApplicationCommandKind::CommitStage, requestId}))) {
-          discardConnection(connection);
-          continue;
-        }
-        reportRealProgress();
-
-        PipeFrameReader reader;
-        auto responseDeadline = std::min(std::chrono::steady_clock::now() + kAgentResponseIdleTimeout, absoluteDeadline);
-        std::size_t lastProcessed = 0;
-        bool commitPhase = false;
-        bool retryRequired = false;
-        for (;;) {
-          const auto bytes = reader.read(connection->pipe.get(), connection->process.get(), connection->released.get(), m_stopEvent.get(), responseDeadline);
-          if (!bytes) break;
-          responseDeadline = std::min(std::chrono::steady_clock::now() + kAgentResponseIdleTimeout, absoluteDeadline);
-          switch (app::applicationCommandMessageKind(*bytes)) {
-            case app::ApplicationCommandMessageKind::Progress: {
-              const auto progress = app::decodeCommandProgress(*bytes);
-              if (!progress || progress->first != requestId) throw std::runtime_error("enhanced mode progress request ID does not match");
-              // 扫描阶段以 total=0 上报已发现文件数，提交阶段才带最终总数。
-              // 两阶段的 processed 都从各自的零点计数，不能把扫描计数直接拿来
-              // 压制提交阶段的 checkpoint，否则大目录扫描完成后整个提交阶段
-              // 可能不再向 SCM 发布真实进度。
-              if (progress->second.total != 0 && !commitPhase) {
-                commitPhase = true;
-                lastProcessed = 0;
-              }
-              if (progress->second.processed > lastProcessed) {
-                lastProcessed = progress->second.processed;
-                reportRealProgress();
-              }
-              break;
-            }
-            case app::ApplicationCommandMessageKind::Result: {
-              const auto result = app::decodeCommandResult(*bytes);
-              if (!result || result->first != requestId) throw std::runtime_error("enhanced mode result request ID does not match");
-              reportRealProgress();
-              if (result->second.authorizesPreshutdownRelease()) return result->second;
-              UWF_LOG_W("service") << "enhanced mode staged commit returned a non-final result: attempt=" << attempt
-                                   << " outcome=" << static_cast<int>(result->second.outcome);
-              lastFailure = result->second.detail.isEmpty() ? QStringLiteral("the UI agent returned a non-final result") : result->second.detail;
-              retryRequired = true;
-              break;
-            }
-            case app::ApplicationCommandMessageKind::Request:
-              throw std::runtime_error("enhanced mode agent sent an unexpected request");
-          }
-          if (retryRequired) break;
-        }
-      } catch (const std::exception& error) {
-        UWF_LOG_W("service") << "enhanced mode staged commit protocol failed: attempt=" << attempt << " error=" << error.what();
-        lastFailure = QString::fromUtf8(error.what());
-      } catch (...) {
-        UWF_LOG_W("service") << "enhanced mode staged commit protocol failed: attempt=" << attempt << " error=non-standard-exception";
-        lastFailure = QStringLiteral("the UI agent protocol failed with a non-standard exception");
-      }
-      discardConnection(connection);
-      const auto remainingAfterFailure = std::min(infrastructureDeadline, absoluteDeadline) - std::chrono::steady_clock::now();
-      if (remainingAfterFailure > std::chrono::steady_clock::duration::zero() &&
-          waitForRetryOrStop(std::min<std::chrono::steady_clock::duration>(kOrchestrationRetryDelay, remainingAfterFailure))) {
-        return app::ApplicationCommandResult::releasedPreshutdown(
-            QStringLiteral("automatic file staging was released because the enhanced mode service infrastructure stopped"));
-      }
+  void applyPreshutdownControl(const EnhancedAgentControl control) {
+    std::scoped_lock lock(m_preshutdownSkipMutex);
+    switch (control) {
+      case EnhancedAgentControl::PreshutdownCommitHandled:
+        m_preshutdownSkipDeadline = std::chrono::steady_clock::now() + kPreshutdownSkipLifetime;
+        break;
+      case EnhancedAgentControl::PreshutdownCommitRequired:
+        m_preshutdownSkipDeadline.reset();
+        break;
     }
-    return app::ApplicationCommandResult::releasedPreshutdown(
-        QStringLiteral("automatic file staging was released after its preshutdown safety deadline: %1").arg(lastFailure));
+  }
+
+  [[nodiscard]] bool consumePreshutdownCommitHandled() {
+    std::scoped_lock lock(m_preshutdownSkipMutex);
+    if (!m_preshutdownSkipDeadline) return false;
+    const bool valid = std::chrono::steady_clock::now() <= *m_preshutdownSkipDeadline;
+    m_preshutdownSkipDeadline.reset();
+    return valid;
   }
 
   void runPreshutdownCommit() {
-    std::mutex heartbeatMutex;
-    std::condition_variable heartbeatChanged;
-    bool completed = false;
-    std::jthread heartbeat([this, &heartbeatMutex, &heartbeatChanged, &completed] {
-      std::unique_lock lock(heartbeatMutex);
-      while (!heartbeatChanged.wait_for(lock, kServiceHeartbeatInterval, [&] { return completed; })) {
-        lock.unlock();
-        try {
-          reportRealProgress();
-        } catch (const std::exception& error) {
-          UWF_LOG_W("service") << "enhanced mode SCM heartbeat failed: error=" << error.what();
-        } catch (...) {
-          UWF_LOG_W("service") << "enhanced mode SCM heartbeat failed: error=non-standard-exception";
-        }
-        lock.lock();
+    if (consumePreshutdownCommitHandled()) {
+      UWF_LOG_I("service") << "enhanced mode staged commit skipped: reason=recent-ui-precommit";
+      return;
+    }
+
+    std::promise<FileStagingCommitResult> resultPromise;
+    auto resultFuture = resultPromise.get_future();
+    std::jthread worker([promise = std::move(resultPromise)]() mutable {
+      try {
+        promise.set_value(commitStagedFiles());
+      } catch (...) {
+        promise.set_exception(std::current_exception());
       }
     });
 
-    app::ApplicationCommandResult result;
+    bool heartbeatAvailable = true;
+    while (resultFuture.wait_for(kServiceHeartbeatInterval) != std::future_status::ready) {
+      if (!heartbeatAvailable) continue;
+      try {
+        reportRealProgress();
+      } catch (const std::exception& error) {
+        heartbeatAvailable = false;
+        UWF_LOG_W("service") << "enhanced mode SCM heartbeat failed while staged commit continues: error=" << error.what();
+      } catch (...) {
+        heartbeatAvailable = false;
+        UWF_LOG_W("service") << "enhanced mode SCM heartbeat failed while staged commit continues: error=non-standard-exception";
+      }
+    }
     try {
-      result = requestStagedCommit();
+      const auto result = resultFuture.get();
+      UWF_LOG_I("service") << "enhanced mode staged commit completed: discovered=" << result.discoveredFiles << " committed=" << result.committedFiles
+                           << " skippedFiles=" << result.skippedFiles << " skippedEntries=" << result.skippedEntries << " failures=" << result.failures.size();
+      for (const auto& failure : result.failures) {
+        UWF_LOG_E("service") << "enhanced mode staged commit item failed: path=" << failure.path.toStdString() << " reason=" << static_cast<int>(failure.kind)
+                             << " error=" << failure.detail.toStdString();
+      }
     } catch (const std::exception& error) {
-      result = app::ApplicationCommandResult::releasedPreshutdown(QString::fromUtf8(error.what()));
+      UWF_LOG_E("service") << "enhanced mode staged commit failed before producing a final batch result: error=" << error.what();
     } catch (...) {
-      result = app::ApplicationCommandResult::releasedPreshutdown(QStringLiteral("non-standard preshutdown orchestration failure"));
+      UWF_LOG_E("service") << "enhanced mode staged commit failed before producing a final batch result: error=non-standard-exception";
     }
-    if (result.outcome == app::ApplicationCommandOutcome::PreshutdownReleased) {
-      UWF_LOG_E("service") << "enhanced mode released the preshutdown barrier after infrastructure failure: error=" << result.detail.toStdString();
-    }
-
-    {
-      std::scoped_lock lock(heartbeatMutex);
-      completed = true;
-    }
-    heartbeatChanged.notify_all();
-    heartbeat.join();
+    worker.join();
   }
 
   void stopInfrastructure() {
     if (m_supervisorThread.joinable()) {
       m_supervisorThread.request_stop();
       SetEvent(m_stopEvent.get());
-      m_connectionChanged.notify_all();
       m_supervisorThread.join();
     }
     if (m_acceptThread.joinable()) {
       m_acceptThread.request_stop();
-      CancelSynchronousIo(reinterpret_cast<HANDLE>(m_acceptThread.native_handle()));
-      {
-        std::scoped_lock lock(m_connectionMutex);
-        if (m_connection) {
-          DisconnectNamedPipe(m_connection->pipe.get());
-          m_connection.reset();
-          ResetEvent(m_agentConnectedEvent.get());
-        }
-      }
-      m_connectionChanged.notify_all();
+      SetEvent(m_stopEvent.get());
       m_acceptThread.join();
     }
   }
@@ -927,7 +787,6 @@ class ServiceRuntime final {
   SERVICE_STATUS m_status{};
   std::mutex m_statusMutex;
   std::atomic_uint32_t m_checkpoint{1};
-  std::atomic_uint64_t m_nextRequestId{1};
   std::atomic_bool m_preshutdownStarted{false};
   std::atomic<DWORD> m_stopExitCode{NO_ERROR};
   UniqueHandle m_stopEvent;
@@ -937,8 +796,9 @@ class ServiceRuntime final {
   std::jthread m_acceptThread;
   std::jthread m_supervisorThread;
   std::mutex m_connectionMutex;
-  std::condition_variable m_connectionChanged;
   std::shared_ptr<AgentConnection> m_connection;
+  std::mutex m_preshutdownSkipMutex;
+  std::optional<std::chrono::steady_clock::time_point> m_preshutdownSkipDeadline;
 };
 
 }  // namespace

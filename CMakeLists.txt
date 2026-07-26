@@ -90,6 +90,8 @@ set(UWF_SOURCES
         src/app/FileStagingConflictPolicy.cpp
         src/service/EnhancedModeAgent.h
         src/service/EnhancedModeAgent.cpp
+        src/service/EnhancedModePipeIo.h
+        src/service/EnhancedModePipeIo.cpp
         src/service/EnhancedModeService.h
         src/service/EnhancedModeServiceControl.cpp
         src/service/EnhancedModeServiceRuntime.cpp
@@ -136,8 +138,6 @@ set(UWF_SOURCES
         src/uwf/FileStagingCommitter.cpp
         src/uwf/FileStagingTask.h
         src/uwf/FileStagingTask.cpp
-        src/uwf/FileStagingHandoff.h
-        src/uwf/FileStagingHandoff.cpp
         src/uwf/RegistryTreeCommitter.h
         src/uwf/RegistryTreeCommitter.cpp
         src/ui/MainWindow.h

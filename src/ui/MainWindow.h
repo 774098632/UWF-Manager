@@ -110,7 +110,7 @@ class MainWindow : public QMainWindow {
 
   // 由"单实例"机制调用：另一个实例被启动时，把本窗口从最小化恢复并带到前台。
   void raiseToFront();
-  void requestFileStagingCommit(FileStagingRequestOrigin origin, FileStagingCoordinator::Completion completion);
+  void requestFileStagingCommit(FileStagingCoordinator::Completion completion);
 
  public slots:
   void refresh();
@@ -229,7 +229,6 @@ class MainWindow : public QMainWindow {
   std::unique_ptr<service::EnhancedModeManager> m_enhancedModeManager;
   std::unique_ptr<service::EnhancedModeAgentConnection> m_ownedEnhancedModeAgent;
   service::EnhancedModeStatus m_enhancedModeStatus;
-  std::optional<std::uint64_t> m_serviceCommitRequestId;
   int m_enhancedModeStatusRetryDelayMs = kEnhancedModeStatusRetryInitialMs;
 
   // 兼容模式标志与系统标识（系统版本未通过校验时为 true）。提示文案每次

@@ -31,7 +31,6 @@
 #include <utility>
 
 #include "../util/Log.h"
-#include "../uwf/FileStagingHandoff.h"
 #include "../uwf/FileStagingTask.h"
 #include "FileStagingPresentation.h"
 #include "I18n.h"
@@ -181,17 +180,13 @@ class FileStagingCoordinator::Operation final : public QDialog {
         case app::ApplicationCommandOutcome::Failed:
           m_detail->setText(batch.command.detail.isEmpty() ? I18n::tr("Automatic file staging stopped because of an unknown error.") : batch.command.detail);
           break;
-        case app::ApplicationCommandOutcome::ContinuationApproved:
-        case app::ApplicationCommandOutcome::PreshutdownReleased:
-          throw std::logic_error("a command batch cannot approve shutdown continuation");
       }
       finishAfterMinimumDuration(std::move(batch));
     } catch (const std::exception& error) {
       finishAfterMinimumDuration({app::ApplicationCommandResult::infrastructureFailure(QString::fromUtf8(error.what())), m_task.sourceEntries()});
     } catch (...) {
-      finishAfterMinimumDuration(
-          {app::ApplicationCommandResult::infrastructureFailure(I18n::tr("Automatic file staging stopped because of an unknown error.")),
-           m_task.sourceEntries()});
+      finishAfterMinimumDuration({app::ApplicationCommandResult::infrastructureFailure(I18n::tr("Automatic file staging stopped because of an unknown error.")),
+                                  m_task.sourceEntries()});
     }
   }
 
@@ -236,8 +231,8 @@ FileStagingCoordinator::FileStagingCoordinator(WmiOperations& session, app::File
 
 FileStagingCoordinator::~FileStagingCoordinator() = default;
 
-const std::array<FileStagingCoordinator::OwnershipTransition, static_cast<std::size_t>(FileStagingCoordinator::Ownership::Count) *
-                                                                  static_cast<std::size_t>(FileStagingCoordinator::OwnershipEvent::Count)>&
+const std::array<FileStagingCoordinator::OwnershipTransition,
+                 static_cast<std::size_t>(FileStagingCoordinator::Ownership::Count) * static_cast<std::size_t>(FileStagingCoordinator::OwnershipEvent::Count)>&
 FileStagingCoordinator::ownershipTransitions() {
   static constexpr auto table = [] {
     std::array<OwnershipTransition, static_cast<std::size_t>(Ownership::Count) * static_cast<std::size_t>(OwnershipEvent::Count)> result{};
@@ -256,8 +251,7 @@ FileStagingCoordinator::ownershipTransitions() {
 }
 
 void FileStagingCoordinator::postOwnershipEvent(const OwnershipEvent event) {
-  const std::size_t index =
-      static_cast<std::size_t>(m_ownership) * static_cast<std::size_t>(OwnershipEvent::Count) + static_cast<std::size_t>(event);
+  const std::size_t index = static_cast<std::size_t>(m_ownership) * static_cast<std::size_t>(OwnershipEvent::Count) + static_cast<std::size_t>(event);
   const auto& transition = ownershipTransitions().at(index);
   if (!transition.valid) throw std::logic_error("invalid file staging ownership transition");
   m_ownership = transition.next;
@@ -286,23 +280,8 @@ void FileStagingCoordinator::ExternalBatch::release() {
   owner->releaseExternalBatch();
 }
 
-void FileStagingCoordinator::requestCommit(const FileStagingRequestOrigin origin, Completion completion) {
+void FileStagingCoordinator::requestCommit(Completion completion) {
   if (!completion) throw std::invalid_argument("file staging completion callback is required");
-  // 交接只允许替代一个尚未开始的新批次。已有命令或安全电源租约时，服务
-  // 必须加入当前所有权域并等待其结果；否则旧交接可能越过正在处理的新批次。
-  if (origin == FileStagingRequestOrigin::ServicePreshutdown && m_ownership == Ownership::Idle) {
-    try {
-      if (auto handedOff = FileStagingHandoff::instance().consume(m_store)) {
-        notifyCompletion(completion, {*handedOff, std::nullopt});
-        return;
-      }
-    } catch (...) {
-      // 无法复核当前列表时不能消费旧结果。普通命令批次会再次读取存储，并把
-      // 具体失败作为非最终结果返回给服务，使 PRESHUTDOWN 保持等待和重试。
-      FileStagingHandoff::instance().clear();
-    }
-  }
-
   m_completions.push_back(std::move(completion));
   if (m_ownership != Ownership::Idle) return;
   startCommandBatch();
@@ -318,7 +297,6 @@ std::optional<FileStagingCoordinator::ExternalBatch> FileStagingCoordinator::res
     m_externalCompletion = std::move(completedActiveBatch);
     return std::nullopt;
   }
-  FileStagingHandoff::instance().clear();
   postOwnershipEvent(OwnershipEvent::ExternalReserved);
   return ExternalBatch(this);
 }
@@ -334,7 +312,6 @@ void FileStagingCoordinator::startCommandBatch() {
     for (const auto& completion : completions) notifyCompletion(completion, result);
   };
   try {
-    FileStagingHandoff::instance().clear();
     auto operation = std::make_unique<Operation>(
         m_session, m_store, m_capability, m_parentWindow, [this](const FileStagingBatchResult& result) { finish(result); },
         [this](const std::size_t processed, const std::size_t total) { emit progressChanged(processed, total); });

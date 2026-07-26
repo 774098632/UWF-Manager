@@ -38,7 +38,6 @@ constexpr std::string_view kTruncatedDetailSuffix = "\n…";
 enum class FrameKind : std::uint16_t {
   Request = 1,
   Result = 2,
-  Progress = 3,
 };
 
 template <typename Integer>
@@ -58,6 +57,7 @@ Integer readInteger(const QByteArray& bytes, const std::size_t offset) {
 }
 
 QByteArray makeFrame(const FrameKind kind, const std::uint64_t requestId, const QByteArray& payload) {
+  if (requestId == 0) throw ApplicationCommandProtocolError("application command request ID cannot be zero");
   if (payload.size() < 0 || static_cast<std::size_t>(payload.size()) > kMaximumPayloadSize) {
     throw ApplicationCommandProtocolError("application command payload is too large");
   }
@@ -93,8 +93,7 @@ std::optional<Frame> decodeFrame(const QByteArray& bytes) {
   }
 
   const auto rawKind = readInteger<std::uint16_t>(bytes, 6);
-  if (rawKind != static_cast<std::uint16_t>(FrameKind::Request) && rawKind != static_cast<std::uint16_t>(FrameKind::Result) &&
-      rawKind != static_cast<std::uint16_t>(FrameKind::Progress)) {
+  if (rawKind != static_cast<std::uint16_t>(FrameKind::Request) && rawKind != static_cast<std::uint16_t>(FrameKind::Result)) {
     throw ApplicationCommandProtocolError("application command frame kind is invalid");
   }
   const auto payloadSize = readInteger<std::uint32_t>(bytes, 16);
@@ -105,8 +104,9 @@ std::optional<Frame> decodeFrame(const QByteArray& bytes) {
     throw ApplicationCommandProtocolError("application command connection contains trailing data");
   }
 
-  return Frame{static_cast<FrameKind>(rawKind), readInteger<std::uint64_t>(bytes, 8),
-               bytes.mid(static_cast<qsizetype>(kHeaderSize), static_cast<qsizetype>(payloadSize))};
+  const auto requestId = readInteger<std::uint64_t>(bytes, 8);
+  if (requestId == 0) throw ApplicationCommandProtocolError("application command request ID cannot be zero");
+  return Frame{static_cast<FrameKind>(rawKind), requestId, bytes.mid(static_cast<qsizetype>(kHeaderSize), static_cast<qsizetype>(payloadSize))};
 }
 
 std::uint64_t checkedSize(const std::size_t value) {
@@ -128,12 +128,6 @@ void validateResult(const ApplicationCommandResult& result) {
   }
   if (result.outcome == ApplicationCommandOutcome::CompletedWithFailures && result.failedFiles == 0) {
     throw ApplicationCommandProtocolError("an application command result marked with failures must contain at least one failure");
-  }
-  if (result.outcome == ApplicationCommandOutcome::ContinuationApproved && result.failedFiles == 0) {
-    throw ApplicationCommandProtocolError("an approved continuation must preserve the failure that required user confirmation");
-  }
-  if (result.outcome == ApplicationCommandOutcome::PreshutdownReleased && result.failedFiles == 0) {
-    throw ApplicationCommandProtocolError("a degraded preshutdown release must preserve its infrastructure failure");
   }
 }
 
@@ -169,22 +163,12 @@ QByteArray encodeCommandRequest(const ApplicationCommandRequest& request) {
   return makeFrame(FrameKind::Request, request.requestId, payload);
 }
 
-QByteArray encodeCommandProgress(const std::uint64_t requestId, const ApplicationCommandProgress& progress) {
-  QByteArray payload;
-  payload.reserve(16);
-  appendInteger(payload, checkedSize(progress.processed));
-  appendInteger(payload, checkedSize(progress.total));
-  return makeFrame(FrameKind::Progress, requestId, payload);
-}
-
 QByteArray encodeCommandResult(const std::uint64_t requestId, const ApplicationCommandResult& result) {
   switch (result.outcome) {
     case ApplicationCommandOutcome::Succeeded:
     case ApplicationCommandOutcome::CompletedWithFailures:
     case ApplicationCommandOutcome::Rejected:
     case ApplicationCommandOutcome::Failed:
-    case ApplicationCommandOutcome::ContinuationApproved:
-    case ApplicationCommandOutcome::PreshutdownReleased:
       break;
     default:
       throw ApplicationCommandProtocolError("application command outcome is invalid");
@@ -204,22 +188,6 @@ QByteArray encodeCommandResult(const std::uint64_t requestId, const ApplicationC
   appendInteger(payload, static_cast<std::uint32_t>(detail.size()));
   payload.append(detail);
   return makeFrame(FrameKind::Result, requestId, payload);
-}
-
-std::optional<std::pair<std::uint64_t, ApplicationCommandProgress>> decodeCommandProgress(const QByteArray& bytes) {
-  const auto frame = decodeFrame(bytes);
-  if (!frame) return std::nullopt;
-  if (frame->kind != FrameKind::Progress || frame->payload.size() != 16) {
-    throw ApplicationCommandProtocolError("application command progress payload is invalid");
-  }
-  ApplicationCommandProgress progress{checkedCounter(readInteger<std::uint64_t>(frame->payload, 0)),
-                                      checkedCounter(readInteger<std::uint64_t>(frame->payload, 8))};
-  // total=0 表示目录扫描阶段，此时 processed 是持续增长的已发现文件数；
-  // total 非零后进入提交阶段，processed 不得越过该批次的最终文件数。
-  if (progress.total != 0 && progress.processed > progress.total) {
-    throw ApplicationCommandProtocolError("application command progress exceeds its total");
-  }
-  return std::pair{frame->requestId, progress};
 }
 
 std::optional<ApplicationCommandRequest> decodeCommandRequest(const QByteArray& bytes) {
@@ -258,8 +226,6 @@ std::optional<std::pair<std::uint64_t, ApplicationCommandResult>> decodeCommandR
     case static_cast<std::uint16_t>(ApplicationCommandOutcome::CompletedWithFailures):
     case static_cast<std::uint16_t>(ApplicationCommandOutcome::Rejected):
     case static_cast<std::uint16_t>(ApplicationCommandOutcome::Failed):
-    case static_cast<std::uint16_t>(ApplicationCommandOutcome::ContinuationApproved):
-    case static_cast<std::uint16_t>(ApplicationCommandOutcome::PreshutdownReleased):
       break;
     default:
       throw ApplicationCommandProtocolError("application command result outcome is invalid");
@@ -295,20 +261,6 @@ std::size_t applicationCommandFrameSize(const QByteArray& bytes) {
   const auto payloadSize = readInteger<std::uint32_t>(bytes, 16);
   if (payloadSize > kMaximumPayloadSize) throw ApplicationCommandProtocolError("application command payload is too large");
   return kHeaderSize + payloadSize;
-}
-
-ApplicationCommandMessageKind applicationCommandMessageKind(const QByteArray& bytes) {
-  const auto frame = decodeFrame(bytes);
-  if (!frame) throw ApplicationCommandProtocolError("application command frame is incomplete");
-  switch (frame->kind) {
-    case FrameKind::Request:
-      return ApplicationCommandMessageKind::Request;
-    case FrameKind::Progress:
-      return ApplicationCommandMessageKind::Progress;
-    case FrameKind::Result:
-      return ApplicationCommandMessageKind::Result;
-  }
-  throw ApplicationCommandProtocolError("application command frame kind is invalid");
 }
 
 }  // namespace uwf::app

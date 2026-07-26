@@ -25,7 +25,6 @@
 #include <utility>
 
 #include "../util/Log.h"
-#include "../uwf/FileStagingHandoff.h"
 #include "../uwf/FileStagingTask.h"
 #include "../uwf/api/UwfFilter.h"
 #include "Dialogs.h"
@@ -37,23 +36,14 @@ namespace uwf::ui {
 
 using dialogs::warning;
 
-namespace {
-
-void approveContinuation(app::ApplicationCommandResult& result) {
-  if (result.completed()) return;
-  if (result.failedFiles == 0) throw std::logic_error("cannot approve shutdown continuation without a recorded file staging failure");
-  result.outcome = app::ApplicationCommandOutcome::ContinuationApproved;
-}
-
-}  // namespace
-
 PowerController::PowerController(PowerControllerServices services, QWidget* dialogParent, QObject* parent)
     : QObject(parent),
       m_dialogParent(dialogParent),
       m_session(services.session),
       m_fileStaging(services.fileStaging),
       m_uwfCapability(services.uwfCapability),
-      m_stagingCoordinator(services.stagingCoordinator) {}
+      m_stagingCoordinator(services.stagingCoordinator),
+      m_preshutdown(std::move(services.preshutdown)) {}
 
 void PowerController::safeShutdown() { execute(PowerAction::Shutdown); }
 
@@ -69,7 +59,8 @@ void PowerController::execute(const PowerAction action) {
   try {
     auto batch = m_stagingCoordinator.reserveExternalBatch([this, action](const FileStagingBatchResult& result, FileStagingCoordinator::ExternalBatch batch) {
       // 协调器会在发布同一批次的所有完成通知时调用这里。把交互式电源对话框
-      // 排到下一轮事件循环，不能让它阻塞服务响应或其它已等待的命令客户端。
+      // 排到下一轮事件循环，不能在协调器发布其它已等待命令的回调栈中进入
+      // 模态事件循环。
       try {
         QTimer::singleShot(0, this, [this, action, result, batch = std::move(batch)]() mutable {
           const auto releaseAction = qScopeGuard([this] { m_actionActive = false; });
@@ -95,11 +86,10 @@ void PowerController::execute(const PowerAction action) {
 }
 
 void PowerController::executeReserved(const PowerAction action, FileStagingCoordinator::ExternalBatch batch) {
-  FileStagingHandoff::instance().clear();
   std::optional<QList<app::FileStagingEntry>> stagedEntries;
   std::optional<app::ApplicationCommandResult> stagingResult;
   // 只有形成最终批次结果后才完成租约。用户在提交前取消时，租约析构会把
-  // 等待中的服务/第二实例请求交给普通命令批次，确保关机请求不会被取消。
+  // 等待中的第二实例请求交给普通命令批次。
   const auto completeBatch = qScopeGuard([&] {
     if (stagingResult) batch.complete({*stagingResult, stagedEntries});
   });
@@ -185,6 +175,7 @@ void PowerController::executeReserved(const PowerAction action, FileStagingCoord
         }};
 
     const auto dialogOutcome = runPowerActionDialog(m_dialogParent, std::move(dialogRequest));
+    bool continuationApproved = false;
     switch (dialogOutcome) {
       case PowerActionDialogOutcome::Canceled:
         return;
@@ -194,17 +185,17 @@ void PowerController::executeReserved(const PowerAction action, FileStagingCoord
       case PowerActionDialogOutcome::ContinuedAfterStagingFailure:
         UWF_LOG_W("power") << "safe power action continuing after user accepted file staging failures";
         if (!stagingResult) throw std::logic_error("safe power action has no file staging failure to approve");
-        approveContinuation(*stagingResult);
+        if (stagingResult->failedFiles == 0) throw std::logic_error("cannot approve a file staging failure without a recorded failed target");
+        continuationApproved = true;
         break;
       case PowerActionDialogOutcome::Confirmed:
         break;
     }
 
     if (!stagingResult) throw std::logic_error("safe power action has no final file staging result");
-    if (!stagingResult->authorizesPreshutdownRelease()) {
+    if (stagingResult->outcome != app::ApplicationCommandOutcome::Succeeded && !continuationApproved) {
       throw std::logic_error("safe power action cannot continue without a completed staging result or explicit user approval");
     }
-    FileStagingHandoff::instance().publish(*stagingResult, stagedEntries);
     invokePowerAction(action);
   } catch (const std::exception& error) {
     reportPowerFailure(action, error);
@@ -214,7 +205,6 @@ void PowerController::executeReserved(const PowerAction action, FileStagingCoord
 }
 
 void PowerController::executeWithCompletedStaging(const PowerAction action, FileStagingBatchResult stagingResult, FileStagingCoordinator::ExternalBatch batch) {
-  FileStagingHandoff::instance().clear();
   bool completeBatch = false;
   const auto releaseBatch = qScopeGuard([&] {
     if (completeBatch) batch.complete(stagingResult);
@@ -230,21 +220,22 @@ void PowerController::executeWithCompletedStaging(const PowerAction action, File
     }
 
     const auto outcome = runPowerActionDialog(m_dialogParent, std::move(request));
+    bool continuationApproved = false;
     if (outcome == PowerActionDialogOutcome::Canceled || outcome == PowerActionDialogOutcome::CanceledAfterStagingFailure) {
-      // 已完整处理的批次仍可满足确认期间到达的独立服务请求；基础设施失败
+      // 已完整处理的批次仍可满足确认期间到达的第二实例命令；基础设施失败
       // 则释放租约，让等待方重新执行，不能把用户取消当成关机放行授权。
       completeBatch = stagingResult.command.completed();
       return;
     }
     if (outcome == PowerActionDialogOutcome::ContinuedAfterStagingFailure) {
       UWF_LOG_W("power") << "safe power action continuing after user accepted file staging failures";
-      approveContinuation(stagingResult.command);
+      if (stagingResult.command.failedFiles == 0) throw std::logic_error("cannot approve a file staging failure without a recorded failed target");
+      continuationApproved = true;
     }
-    if (!stagingResult.command.authorizesPreshutdownRelease()) {
+    if (stagingResult.command.outcome != app::ApplicationCommandOutcome::Succeeded && !continuationApproved) {
       throw std::logic_error("safe power action cannot continue without a completed staging result or explicit user approval");
     }
     completeBatch = true;
-    FileStagingHandoff::instance().publish(stagingResult.command, stagingResult.sourceEntries);
     invokePowerAction(action);
   } catch (const std::exception& error) {
     reportPowerFailure(action, error);
@@ -254,6 +245,16 @@ void PowerController::executeWithCompletedStaging(const PowerAction action, File
 }
 
 void PowerController::invokePowerAction(const PowerAction action) {
+  using ControlResult = PowerControllerServices::PreshutdownControlResult;
+  const ControlResult skipResult = m_preshutdown.markHandled ? m_preshutdown.markHandled() : ControlResult::NotApplicable;
+  if (skipResult == ControlResult::Unacknowledged) {
+    UWF_LOG_W("power") << "enhanced mode preshutdown skip token was not acknowledged; service fallback remains authoritative";
+  }
+  auto revokeSkipOnFailure = qScopeGuard([&] {
+    if (skipResult != ControlResult::NotApplicable && m_preshutdown.markRequired && m_preshutdown.markRequired() == ControlResult::Unacknowledged) {
+      UWF_LOG_W("power") << "enhanced mode preshutdown skip token revocation was not acknowledged";
+    }
+  });
   // 提交文件可能持续一段时间。真正调用电源方法前重新读取 Filter，避免沿用
   // 对话框打开前取得的对象身份和状态快照。
   api::UwfFilter filter(m_session);
@@ -262,13 +263,10 @@ void PowerController::invokePowerAction(const PowerAction action) {
     filter.shutdownSystem(row);
   else
     filter.restartSystem(row);
+  revokeSkipOnFailure.dismiss();
 }
 
 void PowerController::reportPowerFailure(const PowerAction action, const std::exception& error) {
-  // 只有真正的电源请求成功返回后，PRESHUTDOWN 才能复用本轮结果。若最终
-  // Filter 复核或关机/重启调用失败，必须撤销交接，避免随后一次独立系统
-  // 关机误把旧结果当成已经处理过本轮暂存列表。
-  FileStagingHandoff::instance().clear();
   const bool shutdown = action == PowerAction::Shutdown;
   UWF_LOG_E("power") << (shutdown ? "safe shutdown failed: error=" : "safe restart failed: error=") << error.what();
   const QString title = shutdown ? I18n::tr("Safe shutdown failed") : I18n::tr("Safe restart failed");
@@ -278,7 +276,6 @@ void PowerController::reportPowerFailure(const PowerAction action, const std::ex
 }
 
 void PowerController::reportUnknownPowerFailure(const PowerAction action) {
-  FileStagingHandoff::instance().clear();
   const bool shutdown = action == PowerAction::Shutdown;
   UWF_LOG_E("power") << (shutdown ? "safe shutdown failed: error=non-standard-exception" : "safe restart failed: error=non-standard-exception");
   warning(m_dialogParent, shutdown ? I18n::tr("Safe shutdown failed") : I18n::tr("Safe restart failed"),

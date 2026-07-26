@@ -16,6 +16,7 @@
  */
 
 #include <QtTest>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <limits>
@@ -31,6 +32,7 @@
 #include "app/StartupOptions.h"
 #include "core/RegistryExclusionPolicy.h"
 #include "core/UwfModel.h"
+#include "service/EnhancedModeService.h"
 #include "ui/Pager.h"
 #include "ui/UsageBarGeometry.h"
 #include "util/ByteFormat.h"
@@ -61,6 +63,7 @@ class CoreBehaviorTests final : public QObject {
  private slots:
   void startupOptionsClassifyEveryExclusiveMode();
   void applicationCommandProtocolRejectsTruncationAndCorruption();
+  void enhancedAgentControlProtocolCorrelatesAcknowledgements();
   void fileStagingRegistryCodecPreservesKindsAndRejectsCorruption();
   void fileStagingConflictsRespectCaseAndPathSegments();
   void stringAndDriveNormalization();
@@ -128,7 +131,7 @@ void CoreBehaviorTests::applicationCommandProtocolRejectsTruncationAndCorruption
   const ApplicationCommandRequest request{ApplicationCommandKind::CommitStage, std::numeric_limits<std::uint64_t>::max()};
   const QByteArray requestBytes = encodeCommandRequest(request);
   QCOMPARE(decodeCommandRequest(requestBytes), std::optional<ApplicationCommandRequest>{request});
-  QCOMPARE(applicationCommandMessageKind(requestBytes), ApplicationCommandMessageKind::Request);
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(encodeCommandRequest({ApplicationCommandKind::Activate, 0})));
 
   for (qsizetype length = 0; length < requestBytes.size(); ++length) {
     QVERIFY(!decodeCommandRequest(requestBytes.left(length)).has_value());
@@ -147,21 +150,14 @@ void CoreBehaviorTests::applicationCommandProtocolRejectsTruncationAndCorruption
   corrupt[20] = '\1';
   QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
   corrupt = requestBytes;
+  std::fill(corrupt.begin() + 8, corrupt.begin() + 16, '\0');
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
+  corrupt = requestBytes;
   corrupt[26] = '\1';
   QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
   corrupt = requestBytes;
   corrupt.append('x');
   QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
-
-  const ApplicationCommandProgress progress{123, 456};
-  const QByteArray progressBytes = encodeCommandProgress(request.requestId, progress);
-  const std::optional expectedProgress{std::pair{request.requestId, progress}};
-  QCOMPARE(decodeCommandProgress(progressBytes), expectedProgress);
-  QCOMPARE(applicationCommandMessageKind(progressBytes), ApplicationCommandMessageKind::Progress);
-  const ApplicationCommandProgress scanProgress{123, 0};
-  const std::optional expectedScanProgress{std::pair{request.requestId, scanProgress}};
-  QCOMPARE(decodeCommandProgress(encodeCommandProgress(request.requestId, scanProgress)), expectedScanProgress);
-  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandProgress(encodeCommandProgress(request.requestId, {457, 456}))));
 
   const ApplicationCommandResult result{ApplicationCommandOutcome::CompletedWithFailures, 10, 7, 2, 1, 3, QStringLiteral("路径失败")};
   const QByteArray resultBytes = encodeCommandResult(request.requestId, result);
@@ -175,22 +171,7 @@ void CoreBehaviorTests::applicationCommandProtocolRejectsTruncationAndCorruption
   QCOMPARE(decoded->second.skippedEntries, result.skippedEntries);
   QCOMPARE(decoded->second.failedFiles, result.failedFiles);
   QCOMPARE(decoded->second.detail, result.detail);
-  QCOMPARE(applicationCommandMessageKind(resultBytes), ApplicationCommandMessageKind::Result);
-
-  const ApplicationCommandResult approvedContinuation{ApplicationCommandOutcome::ContinuationApproved, 4, 1, 0, 0, 1, QStringLiteral("用户已确认继续关机")};
-  const auto decodedContinuation = decodeCommandResult(encodeCommandResult(request.requestId, approvedContinuation));
-  QVERIFY(decodedContinuation.has_value());
-  QCOMPARE(decodedContinuation->second.outcome, ApplicationCommandOutcome::ContinuationApproved);
-  QVERIFY(!decodedContinuation->second.completed());
-  QVERIFY(decodedContinuation->second.authorizesPreshutdownRelease());
-
-  const auto infrastructureRelease = ApplicationCommandResult::releasedPreshutdown(QStringLiteral("agent unavailable"));
-  const auto decodedInfrastructureRelease = decodeCommandResult(encodeCommandResult(request.requestId, infrastructureRelease));
-  QVERIFY(decodedInfrastructureRelease.has_value());
-  QCOMPARE(decodedInfrastructureRelease->second.outcome, ApplicationCommandOutcome::PreshutdownReleased);
-  QVERIFY(!decodedInfrastructureRelease->second.completed());
-  QVERIFY(decodedInfrastructureRelease->second.authorizesPreshutdownRelease());
-  QCOMPARE(decodedInfrastructureRelease->second.failedFiles, std::size_t{1});
+  QVERIFY(decoded->second.completed());
 
   corrupt = resultBytes;
   corrupt[corrupt.size() - 1] = static_cast<char>(0xFF);
@@ -201,11 +182,6 @@ void CoreBehaviorTests::applicationCommandProtocolRejectsTruncationAndCorruption
                            static_cast<void>(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::CompletedWithFailures, 1, 0, 1, 0, 0, {}})));
   QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError,
                            static_cast<void>(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::Succeeded, 1, 1, 1, 0, 0, {}})));
-  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError,
-                           static_cast<void>(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::ContinuationApproved, 1, 0, 1, 0, 0, {}})));
-  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError,
-                           static_cast<void>(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::PreshutdownReleased, 0, 0, 0, 0, 0, {}})));
-
   corrupt = resultBytes;
   corrupt[24] = static_cast<char>(ApplicationCommandOutcome::Succeeded);
   corrupt[25] = '\0';
@@ -219,6 +195,36 @@ void CoreBehaviorTests::applicationCommandProtocolRejectsTruncationAndCorruption
   QCOMPARE(oversized->second.failedFiles, std::size_t{1});
   QVERIFY(oversized->second.detail.toUtf8().size() <= 64 * 1024 - 48);
   QVERIFY(oversized->second.detail.endsWith(QStringLiteral("\n…")));
+}
+
+void CoreBehaviorTests::enhancedAgentControlProtocolCorrelatesAcknowledgements() {
+  using namespace uwf::service;
+
+  constexpr EnhancedAgentControlMessage handled{EnhancedAgentControl::PreshutdownCommitHandled, 0x0102030405060708ULL};
+  constexpr auto handledFrame = encodeEnhancedAgentControl(handled);
+  static_assert(handledFrame == EnhancedAgentControlFrame{1, 8, 7, 6, 5, 4, 3, 2, 1});
+  static_assert(decodeEnhancedAgentControl(handledFrame) == std::optional{handled});
+
+  constexpr EnhancedAgentControlMessage required{EnhancedAgentControl::PreshutdownCommitRequired, std::numeric_limits<std::uint64_t>::max()};
+  constexpr auto requiredFrame = encodeEnhancedAgentControl(required);
+  static_assert(decodeEnhancedAgentControl(requiredFrame) == std::optional{required});
+
+  auto invalid = handledFrame;
+  invalid[0] = 0;
+  QVERIFY(!decodeEnhancedAgentControl(invalid).has_value());
+  invalid = handledFrame;
+  std::ranges::fill(invalid.begin() + 1, invalid.end(), std::uint8_t{0});
+  QVERIFY(!decodeEnhancedAgentControl(invalid).has_value());
+  QVERIFY_THROWS_EXCEPTION(std::invalid_argument, static_cast<void>(encodeEnhancedAgentControl({EnhancedAgentControl::PreshutdownCommitHandled, 0})));
+  QVERIFY_THROWS_EXCEPTION(std::invalid_argument,
+                           static_cast<void>(encodeEnhancedAgentControl({static_cast<EnhancedAgentControl>(std::numeric_limits<std::uint8_t>::max()), 1})));
+
+  // 确认必须关联完整请求，而不能只比较动作。相同动作的延迟 ACK 仍属于
+  // 旧请求，不得放行下一次安全电源操作。
+  constexpr EnhancedAgentControlMessage previous{EnhancedAgentControl::PreshutdownCommitHandled, 41};
+  constexpr EnhancedAgentControlMessage current{EnhancedAgentControl::PreshutdownCommitHandled, 42};
+  QVERIFY(decodeEnhancedAgentControl(encodeEnhancedAgentControl(previous)) != std::optional{current});
+  QCOMPARE(decodeEnhancedAgentControl(encodeEnhancedAgentControl(current)), std::optional{current});
 }
 
 void CoreBehaviorTests::fileStagingRegistryCodecPreservesKindsAndRejectsCorruption() {
@@ -253,10 +259,9 @@ void CoreBehaviorTests::fileStagingRegistryCodecPreservesKindsAndRejectsCorrupti
 
 void CoreBehaviorTests::fileStagingConflictsRespectCaseAndPathSegments() {
   uwf::app::FileStagingConflictPolicy policy;
-  policy.setFileExclusions(
-      {QStringLiteral("C:/Program Data/Vendor/"), QStringLiteral("c:\\program data\\vendor"), QStringLiteral("D:\\Shared")});
-  policy.setStagedEntries({{uwf::app::FileStagingKind::File, QStringLiteral("C:\\Cache\\state.bin")},
-                           {uwf::app::FileStagingKind::Directory, QStringLiteral("D:/Work/Tree")}});
+  policy.setFileExclusions({QStringLiteral("C:/Program Data/Vendor/"), QStringLiteral("c:\\program data\\vendor"), QStringLiteral("D:\\Shared")});
+  policy.setStagedEntries(
+      {{uwf::app::FileStagingKind::File, QStringLiteral("C:\\Cache\\state.bin")}, {uwf::app::FileStagingKind::Directory, QStringLiteral("D:/Work/Tree")}});
 
   const auto vendorConflict = policy.conflictingExclusion(QStringLiteral("c:\\PROGRAM DATA\\Vendor\\state.db"));
   QVERIFY(vendorConflict.has_value());

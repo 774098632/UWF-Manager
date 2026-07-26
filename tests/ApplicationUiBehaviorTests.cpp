@@ -44,17 +44,19 @@
 #include <QtTest>
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <deque>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <stop_token>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-#include "app/FileStagingStore.h"
 #include "app/FileStagingConflictPolicy.h"
+#include "app/FileStagingStore.h"
 #include "core/UwfModel.h"
 #include "service/EnhancedModeAgent.h"
 #include "service/EnhancedModeService.h"
@@ -83,7 +85,6 @@
 #include "util/DriveLetter.h"
 #include "util/Log.h"
 #include "uwf/FileStagingCommitter.h"
-#include "uwf/FileStagingHandoff.h"
 #include "uwf/FileStagingTask.h"
 #include "uwf/RegistryTreeCommitter.h"
 #include "uwf/api/UwfmgrCli.h"
@@ -224,8 +225,10 @@ class MemoryFileStagingStore final : public app::FileStagingStore {
   QString readFailure;
   QString writeFailure;
   int writes = 0;
+  mutable int loads = 0;
 
   [[nodiscard]] QList<app::FileStagingEntry> load() const override {
+    ++loads;
     if (!readFailure.isEmpty()) throw std::runtime_error(readFailure.toStdString());
     return entries;
   }
@@ -291,9 +294,7 @@ class MemoryEnhancedModeAgent final : public service::EnhancedModeAgentConnectio
  public:
   int starts = 0;
   int stops = 0;
-  std::vector<std::uint64_t> completedRequests;
-  std::vector<app::ApplicationCommandResult> completedResults;
-  std::vector<std::uint64_t> progressRequests;
+  std::vector<bool> preshutdownCommitStates;
 
   void start() override {
     if (m_running) return;
@@ -308,15 +309,15 @@ class MemoryEnhancedModeAgent final : public service::EnhancedModeAgentConnectio
   }
 
   [[nodiscard]] bool running() const override { return m_running; }
-
-  void reportProgress(const std::uint64_t requestId, std::size_t, std::size_t) override { progressRequests.push_back(requestId); }
-
-  void complete(const std::uint64_t requestId, const app::ApplicationCommandResult& result) override {
-    completedRequests.push_back(requestId);
-    completedResults.push_back(result);
+  [[nodiscard]] bool markPreshutdownCommitHandled() override {
+    preshutdownCommitStates.push_back(true);
+    return true;
+  }
+  [[nodiscard]] bool requirePreshutdownCommit() override {
+    preshutdownCommitStates.push_back(false);
+    return true;
   }
 
-  void requestCommit(const std::uint64_t requestId) { emit commitStageRequested(requestId); }
   void publishConnectionState(const bool connected) { emit connectionStateChanged(connected); }
 
  private:
@@ -379,7 +380,7 @@ class ApplicationUiBehaviorTests final : public QObject {
   void enhancedModeRemovalPreflightsProtectedRegistryPersistence();
   void mainWindowEnhancedModeActionTracksTheServiceLifecycle();
   void mainWindowRetriesTransientEnhancedModeStatusFailures();
-  void mainWindowRoutesAuthenticatedServiceRequestsThroughSharedCoordinator();
+  void mainWindowTreatsAuthenticatedServiceConnectionAsStatusOnly();
   void emptyAndMissingRegistryPlansSkipUwfInvocation();
   void diskCommitActionsRouteSelectedTargetsAndHonorCancellation();
   void importRoutingAndPendingCollectionCoverInvalidDuplicateAndMissingTargets();
@@ -408,7 +409,6 @@ void ApplicationUiBehaviorTests::initTestCase() {
 }
 
 void ApplicationUiBehaviorTests::cleanupTestCase() {
-  FileStagingHandoff::instance().clear();
   ui::I18n::instance().setLang(m_originalLanguage);
   ui::ThemeManager::instance().apply(m_originalTheme);
   clearLogLines();
@@ -907,8 +907,7 @@ void ApplicationUiBehaviorTests::fileStagingCommitterTreatsPersistentAndAbsentTa
   nestedExclusionWmi.readResults.push_back(fileExclusionResult({existingPath.toStdString()}));
   FileStagingCommitter nestedExclusionCommitter(nestedExclusionWmi);
   const auto nestedExclusionResult =
-      completeFileStaging(nestedExclusionCommitter,
-                          {{app::FileStagingKind::Directory, QDir::toNativeSeparators(directory.path())}});
+      completeFileStaging(nestedExclusionCommitter, {{app::FileStagingKind::Directory, QDir::toNativeSeparators(directory.path())}});
   QCOMPARE(nestedExclusionResult.skippedFiles, std::size_t{1});
   QCOMPARE(nestedExclusionResult.discoveredFiles, std::size_t{0});
   QVERIFY(nestedExclusionResult.succeeded());
@@ -923,8 +922,7 @@ void ApplicationUiBehaviorTests::fileStagingCommitterTreatsPersistentAndAbsentTa
                                                    {"CommitPending", WmiValue::fromBool(false)},
                                                    {"Protected", WmiValue::fromBool(true)}}});
   FileStagingCommitter exclusionReadFailureCommitter(exclusionReadFailureWmi);
-  const auto exclusionReadFailureResult =
-      completeFileStaging(exclusionReadFailureCommitter, {{app::FileStagingKind::File, existingPath}});
+  const auto exclusionReadFailureResult = completeFileStaging(exclusionReadFailureCommitter, {{app::FileStagingKind::File, existingPath}});
   QCOMPARE(exclusionReadFailureResult.failures.size(), 1);
   QCOMPARE(exclusionReadFailureResult.failures.front().kind, FileStagingCommitFailureKind::ProviderFailure);
   QVERIFY(exclusionReadFailureWmi.invocations.empty());
@@ -1033,15 +1031,11 @@ void ApplicationUiBehaviorTests::fileStagingCommandUiCoalescesRequestsAndComplet
   app::ApplicationCommandResult secondResult;
   QElapsedTimer visibleDuration;
   visibleDuration.start();
-  app::ApplicationCommandResult obsoleteResult;
-  obsoleteResult.discoveredFiles = 99;
-  obsoleteResult.committedFiles = 99;
-  FileStagingHandoff::instance().publish(obsoleteResult, store.entries);
-  coordinator.requestCommit(ui::FileStagingRequestOrigin::UserCommand, [&](const ui::FileStagingBatchResult& result) {
+  coordinator.requestCommit([&](const ui::FileStagingBatchResult& result) {
     firstResult = result.command;
     ++completions;
   });
-  coordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown, [&](const ui::FileStagingBatchResult& result) {
+  coordinator.requestCommit([&](const ui::FileStagingBatchResult& result) {
     secondResult = result.command;
     ++completions;
   });
@@ -1051,7 +1045,7 @@ void ApplicationUiBehaviorTests::fileStagingCommandUiCoalescesRequestsAndComplet
   auto immediateBatch = coordinator.reserveExternalBatch([&](const ui::FileStagingBatchResult& result, ui::FileStagingCoordinator::ExternalBatch batch) {
     externalOwnershipTransferred = coordinator.active();
     QCOMPARE(result.sourceEntries, std::optional<QList<app::FileStagingEntry>>{store.entries});
-    coordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown, [&](const ui::FileStagingBatchResult& queued) {
+    coordinator.requestCommit([&](const ui::FileStagingBatchResult& queued) {
       requestQueuedDuringExternalOwnership = true;
       queuedResult = queued.command;
     });
@@ -1077,43 +1071,15 @@ void ApplicationUiBehaviorTests::fileStagingCommandUiCoalescesRequestsAndComplet
   QCOMPARE(wmi.invocations, std::vector<QString>({QStringLiteral("CommitFile"), QStringLiteral("CommitFile")}));
   QVERIFY(!progress.isEmpty());
 
-  app::ApplicationCommandResult handedOff;
-  handedOff.discoveredFiles = 2;
-  handedOff.committedFiles = 2;
-  FileStagingHandoff::instance().publish(handedOff, store.entries);
-  bool handoffCompleted = false;
-  coordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown, [&](const ui::FileStagingBatchResult& result) {
-    handoffCompleted = true;
-    QCOMPARE(result.command.committedFiles, std::size_t{2});
-  });
-  QVERIFY(handoffCompleted);
-  QVERIFY(!coordinator.active());
-  QCOMPARE(wmi.invocations.size(), std::size_t{2});
-
-  FileStagingHandoff::instance().publish(handedOff, store.entries);
-  auto changedEntries = store.entries;
-  changedEntries.append({app::FileStagingKind::File, QStringLiteral("C:\\changed-after-canceled-shutdown.bin")});
-  store.entries = changedEntries;
-  QVERIFY(!FileStagingHandoff::instance().consume(store).has_value());
-
-  app::ApplicationCommandResult approvedResult{app::ApplicationCommandOutcome::ContinuationApproved, 2, 1, 0, 0, 1,
-                                               QStringLiteral("explicitly approved staging failure")};
-  store.entries.clear();
-  for (const QString& path : paths) store.entries.append({app::FileStagingKind::File, path});
-  FileStagingHandoff::instance().publish(approvedResult, store.entries);
-  store.entries.append({app::FileStagingKind::File, QStringLiteral("C:\\changed-after-explicit-approval.bin")});
-  QVERIFY(!FileStagingHandoff::instance().consume(store).has_value());
-
   auto exclusiveBatch = coordinator.reserveExternalBatch([](const ui::FileStagingBatchResult&, ui::FileStagingCoordinator::ExternalBatch) {});
   QVERIFY(exclusiveBatch.has_value());
   QVERIFY_THROWS_EXCEPTION(
       std::logic_error,
       static_cast<void>(coordinator.reserveExternalBatch([](const ui::FileStagingBatchResult&, ui::FileStagingCoordinator::ExternalBatch) {})));
   bool completionAfterThrowWasDelivered = false;
-  coordinator.requestCommit(ui::FileStagingRequestOrigin::UserCommand, [](const ui::FileStagingBatchResult&) { throw std::runtime_error("observer failure"); });
-  coordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown,
-                            [&](const ui::FileStagingBatchResult&) { completionAfterThrowWasDelivered = true; });
-  exclusiveBatch->complete({handedOff, store.entries});
+  coordinator.requestCommit([](const ui::FileStagingBatchResult&) { throw std::runtime_error("observer failure"); });
+  coordinator.requestCommit([&](const ui::FileStagingBatchResult&) { completionAfterThrowWasDelivered = true; });
+  exclusiveBatch->complete({firstResult, store.entries});
   QVERIFY(completionAfterThrowWasDelivered);
   QVERIFY(!coordinator.active());
 }
@@ -1140,6 +1106,7 @@ void ApplicationUiBehaviorTests::enhancedModeDialogReflectsDisabledEnabledAndRep
   QCOMPARE(change->text(), QStringLiteral("Disable enhanced mode"));
   QVERIFY(remove->isEnabled());
 
+  const int queriesBeforeAgentStateChanges = serviceControl.queries;
   manager.setAgentState(service::EnhancedModeAgentState::Connecting);
   auto* issue = dialog.findChild<QLabel*>(QStringLiteral("enhancedModeIssue"));
   QVERIFY(issue);
@@ -1152,6 +1119,7 @@ void ApplicationUiBehaviorTests::enhancedModeDialogReflectsDisabledEnabledAndRep
 
   manager.setAgentState(service::EnhancedModeAgentState::Connected);
   QVERIFY(!issue->isVisible());
+  QCOMPARE(serviceControl.queries, queriesBeforeAgentStateChanges);
 
   QTest::mouseClick(change, Qt::LeftButton);
   QCOMPARE(serviceControl.removals, 1);
@@ -1177,7 +1145,7 @@ void ApplicationUiBehaviorTests::enhancedModeDialogReflectsDisabledEnabledAndRep
   QVERIFY(start && stoppedStatus && stoppedIssue);
   QCOMPARE(stoppedStatus->text(), QStringLiteral("Status: Service stopped"));
   QCOMPARE(start->text(), QStringLiteral("Start service"));
-  QCOMPARE(stoppedIssue->text(), QStringLiteral("The service is not running."));
+  QVERIFY(!stoppedIssue->isVisible());
   QTest::mouseClick(start, Qt::LeftButton);
   QCOMPARE(serviceControl.starts, 1);
   QCOMPARE(serviceControl.installs, 1);
@@ -1355,7 +1323,7 @@ void ApplicationUiBehaviorTests::mainWindowRetriesTransientEnhancedModeStatusFai
   QVERIFY(enhancedAction->icon().cacheKey() != failureIcon);
 }
 
-void ApplicationUiBehaviorTests::mainWindowRoutesAuthenticatedServiceRequestsThroughSharedCoordinator() {
+void ApplicationUiBehaviorTests::mainWindowTreatsAuthenticatedServiceConnectionAsStatusOnly() {
   RecordingWmiOperations wmi;
   MemoryFileStagingStore staging;
   staging.entries = {{app::FileStagingKind::File, QStringLiteral("C:\\State\\pending.bin")}};
@@ -1373,13 +1341,11 @@ void ApplicationUiBehaviorTests::mainWindowRoutesAuthenticatedServiceRequestsThr
   QTRY_COMPARE_WITH_TIMEOUT(source.reads, 1, 1000);
   QCOMPARE(agent.starts, 1);
 
+  const int queriesBeforeAuthentication = serviceControl.queries;
   agent.publishConnectionState(true);
-  agent.requestCommit(41);
-  QTRY_COMPARE_WITH_TIMEOUT(agent.completedRequests.size(), std::size_t{1}, 3000);
-  QCOMPARE(agent.completedRequests.front(), std::uint64_t{41});
-  QCOMPARE(agent.completedResults.front().outcome, app::ApplicationCommandOutcome::Succeeded);
-  QCOMPARE(agent.completedResults.front().skippedEntries, std::size_t{1});
-  QVERIFY(agent.progressRequests.empty());
+  QCoreApplication::processEvents();
+  QCOMPARE(serviceControl.queries, queriesBeforeAuthentication);
+  QCOMPARE(staging.loads, 0);
   QVERIFY(wmi.queryResults.empty());
   QVERIFY(wmi.invocations.empty());
 }
@@ -1825,7 +1791,6 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   QVERIFY(readFailureDetailsVisible);
   QVERIFY(unreadableWmi.queryResults.empty());
   QVERIFY(unreadableWmi.invocations.empty());
-  QVERIFY(!FileStagingHandoff::instance().consume(unreadableStore).has_value());
 
   RecordingWmiOperations approvedUnreadableWmi;
   approvedUnreadableWmi.queryResults.push_back(
@@ -1852,11 +1817,50 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   approvedUnreadableController.safeShutdown();
   QVERIFY(unreadableContinuationConfirmed);
   QCOMPARE(approvedUnreadableWmi.invocations, std::vector<QString>{QStringLiteral("ShutdownSystem")});
-  const auto approvedUnreadableHandoff = FileStagingHandoff::instance().consume(approvedUnreadableStore);
-  QVERIFY(approvedUnreadableHandoff.has_value());
-  QCOMPARE(approvedUnreadableHandoff->outcome, app::ApplicationCommandOutcome::ContinuationApproved);
-  QCOMPARE(approvedUnreadableHandoff->failedFiles, std::size_t{1});
-  QCOMPARE(approvedUnreadableHandoff->detail, QStringLiteral("The file staging list could not be read:\nregistry staging data is corrupt"));
+
+  RecordingWmiOperations rejectedPowerWmi;
+  rejectedPowerWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  rejectedPowerWmi.invocationFailure = std::make_exception_ptr(WmiProviderError(5, "request shutdown", "provider rejected shutdown"));
+  ui::FileStagingCoordinator rejectedPowerCoordinator(rejectedPowerWmi, staging, UwfCapability::Available, nullptr);
+  std::vector<bool> rejectedPowerPreshutdownStates;
+  using PreshutdownControlResult = ui::PowerControllerServices::PreshutdownControlResult;
+  ui::PowerController rejectedPowerController({rejectedPowerWmi,
+                                               staging,
+                                               UwfCapability::Available,
+                                               rejectedPowerCoordinator,
+                                               {[&] {
+                                                  rejectedPowerPreshutdownStates.push_back(true);
+                                                  return PreshutdownControlResult::Acknowledged;
+                                                },
+                                                [&] {
+                                                  rejectedPowerPreshutdownStates.push_back(false);
+                                                  return PreshutdownControlResult::Acknowledged;
+                                                }}},
+                                              nullptr);
+  bool rejectedPowerConfirmed = false;
+  bool rejectedPowerWarningClosed = false;
+  QTimer rejectedPowerDriver;
+  rejectedPowerDriver.setInterval(1);
+  connect(&rejectedPowerDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    if (dialog->objectName() == QStringLiteral("powerConfirmDialog")) {
+      auto* shutdown = dialog->findChild<QPushButton*>(QStringLiteral("dangerBtn"));
+      if (!shutdown || !shutdown->isEnabled()) return;
+      rejectedPowerConfirmed = true;
+      QTest::mouseClick(shutdown, Qt::LeftButton);
+      return;
+    }
+    rejectedPowerWarningClosed = dialog->windowTitle() == QStringLiteral("Safe shutdown failed");
+    dialog->accept();
+    rejectedPowerDriver.stop();
+  });
+  rejectedPowerDriver.start();
+  rejectedPowerController.safeShutdown();
+  QVERIFY(rejectedPowerConfirmed);
+  QVERIFY(rejectedPowerWarningClosed);
+  QCOMPARE(rejectedPowerPreshutdownStates, (std::vector<bool>{true, false}));
 
   wmi.queryResults.push_back(
       {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
@@ -1879,9 +1883,6 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   controller.safeRestart();
   QVERIFY(emptyPreparationBlockedAction);
   QCOMPARE(wmi.invocations, std::vector<QString>{QStringLiteral("RestartSystem")});
-  const auto emptyHandoff = FileStagingHandoff::instance().consume(staging);
-  QVERIFY(emptyHandoff.has_value());
-  QCOMPARE(emptyHandoff->outcome, app::ApplicationCommandOutcome::Succeeded);
 
   QTemporaryDir directory;
   QVERIFY(directory.isValid());
@@ -1920,11 +1921,24 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   MemoryFileStagingStore stagedStore;
   stagedStore.entries = {{app::FileStagingKind::File, stagedPath}, {app::FileStagingKind::Directory, QDir::toNativeSeparators(directory.path())}};
   ui::FileStagingCoordinator stagedCoordinator(stagedWmi, stagedStore, UwfCapability::Available, nullptr);
-  ui::PowerController stagedController({stagedWmi, stagedStore, UwfCapability::Available, stagedCoordinator}, nullptr);
+  std::vector<bool> stagedPreshutdownStates;
+  ui::PowerController stagedController({stagedWmi,
+                                        stagedStore,
+                                        UwfCapability::Available,
+                                        stagedCoordinator,
+                                        {[&] {
+                                           stagedPreshutdownStates.push_back(true);
+                                           return PreshutdownControlResult::Acknowledged;
+                                         },
+                                         [&] {
+                                           stagedPreshutdownStates.push_back(false);
+                                           return PreshutdownControlResult::Acknowledged;
+                                         }}},
+                                       nullptr);
   bool calculationStateVisible = false;
   bool expandedFileCountVisible = false;
-  bool concurrentServiceRequestQueued = false;
-  std::optional<app::ApplicationCommandResult> concurrentServiceResult;
+  bool concurrentCommandQueued = false;
+  std::optional<app::ApplicationCommandResult> concurrentCommandResult;
   QTimer stagedDriver;
   stagedDriver.setInterval(1);
   connect(&stagedDriver, &QTimer::timeout, this, [&] {
@@ -1940,10 +1954,9 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
     if (stagingDetail->isVisible()) {
       expandedFileCountVisible = stagingDetail->text().contains(QStringLiteral("3 file(s)"));
     }
-    if (!concurrentServiceRequestQueued) {
-      concurrentServiceRequestQueued = true;
-      stagedCoordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown,
-                                      [&](const ui::FileStagingBatchResult& result) { concurrentServiceResult = result.command; });
+    if (!concurrentCommandQueued) {
+      concurrentCommandQueued = true;
+      stagedCoordinator.requestCommit([&](const ui::FileStagingBatchResult& result) { concurrentCommandResult = result.command; });
       QCOMPARE(QApplication::activeModalWidget()->objectName(), QStringLiteral("powerConfirmDialog"));
     }
     QTest::mouseClick(restart, Qt::LeftButton);
@@ -1953,13 +1966,14 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   stagedController.safeRestart();
   QVERIFY(calculationStateVisible);
   QVERIFY(expandedFileCountVisible);
-  QVERIFY(concurrentServiceRequestQueued);
-  QVERIFY(concurrentServiceResult.has_value());
-  QCOMPARE(concurrentServiceResult->committedFiles, std::size_t{3});
+  QVERIFY(concurrentCommandQueued);
+  QVERIFY(concurrentCommandResult.has_value());
+  QCOMPARE(concurrentCommandResult->committedFiles, std::size_t{3});
   QCOMPARE(stagedWmi.invocations,
            std::vector<QString>({QStringLiteral("CommitFile"), QStringLiteral("CommitFile"), QStringLiteral("CommitFile"), QStringLiteral("RestartSystem")}));
   QCOMPARE(stagedWmi.invocationPaths,
            std::vector<QString>({QStringLiteral("volume-path"), QStringLiteral("volume-path"), QStringLiteral("volume-path"), QStringLiteral("filter-path")}));
+  QCOMPARE(stagedPreshutdownStates, std::vector<bool>{true});
 
   RecordingWmiOperations failedWmi;
   failedWmi.queryResults.push_back(
@@ -2024,6 +2038,8 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   ui::PowerController continuedController({continuedWmi, stagedStore, UwfCapability::Available, continuedCoordinator}, nullptr);
   bool continueActionClicked = false;
   bool continueDecisionClicked = false;
+  bool commandQueuedDuringPowerApproval = false;
+  std::optional<app::ApplicationCommandResult> commandResultAfterPowerApproval;
   QTimer continueDriver;
   continueDriver.setInterval(1);
   connect(&continueDriver, &QTimer::timeout, this, [&] {
@@ -2032,6 +2048,10 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
     auto* details = dialog->findChild<QPlainTextEdit*>(QStringLiteral("powerStagingFailureDetails"));
     auto* shutdown = dialog->findChild<QPushButton*>(QStringLiteral("dangerBtn"));
     if (details && details->isVisible() && shutdown) {
+      if (!commandQueuedDuringPowerApproval) {
+        commandQueuedDuringPowerApproval = true;
+        continuedCoordinator.requestCommit([&](const ui::FileStagingBatchResult& result) { commandResultAfterPowerApproval = result.command; });
+      }
       continueDecisionClicked = shutdown->text() == QStringLiteral("Continue shutdown");
       QTest::mouseClick(shutdown, Qt::LeftButton);
       continueDriver.stop();
@@ -2046,12 +2066,10 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   continueDriver.start();
   continuedController.safeShutdown();
   QVERIFY(continueDecisionClicked);
+  QVERIFY(commandResultAfterPowerApproval.has_value());
+  QCOMPARE(commandResultAfterPowerApproval->outcome, app::ApplicationCommandOutcome::CompletedWithFailures);
   QCOMPARE(continuedWmi.invocations,
            std::vector<QString>({QStringLiteral("CommitFile"), QStringLiteral("CommitFile"), QStringLiteral("CommitFile"), QStringLiteral("ShutdownSystem")}));
-  const auto failureHandoff = FileStagingHandoff::instance().consume(stagedStore);
-  QVERIFY(failureHandoff.has_value());
-  QCOMPARE(failureHandoff->outcome, app::ApplicationCommandOutcome::CompletedWithFailures);
-  QCOMPARE(failureHandoff->failedFiles, std::size_t{1});
 
   RecordingWmiOperations disabledWmi;
   disabledWmi.queryResults.push_back(

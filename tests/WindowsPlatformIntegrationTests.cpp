@@ -17,13 +17,22 @@
 
 #include <QApplication>
 #include <QProcess>
+#include <QScopeGuard>
 #include <QSignalSpy>
+#include <QUuid>
 #include <QtTest>
+#include <array>
+#include <chrono>
+#include <cstddef>
 #include <exception>
 #include <filesystem>
+#include <future>
 #include <memory>
+#include <string>
+#include <thread>
 
 #include "app/SecureSingleInstance.h"
+#include "service/EnhancedModePipeIo.h"
 #include "ui/SystemInfoProvider.h"
 #include "util/SystemHardwareInfo.h"
 #include "util/WindowsVersion.h"
@@ -42,6 +51,7 @@ class WindowsPlatformIntegrationTests final : public QObject {
   void windowsAndHardwareMetadataRemainInternallyConsistent();
   void cimv2TransportDistinguishesPresentAndMissingClasses();
   void embeddedCapabilityAndSnapshotUseTheProductionTransport();
+  void enhancedModePipeReadIsCancelledByStopEvent();
   void singleInstanceForwardsTypedCommandsAcrossTrustedProcesses();
 };
 
@@ -112,6 +122,39 @@ void WindowsPlatformIntegrationTests::embeddedCapabilityAndSnapshotUseTheProduct
   } catch (...) {
     QFAIL("Embedded WMI transport raised a non-standard exception");
   }
+}
+
+void WindowsPlatformIntegrationTests::enhancedModePipeReadIsCancelledByStopEvent() {
+  const std::wstring pipeName = QStringLiteral("\\\\.\\pipe\\UWFManager.Tests.%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)).toStdWString();
+  const HANDLE server = CreateNamedPipeW(pipeName.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                                         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 1024, 1024, 0, nullptr);
+  QVERIFY(server != INVALID_HANDLE_VALUE);
+  const auto closeServer = qScopeGuard([server] { CloseHandle(server); });
+
+  const HANDLE client = CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+  QVERIFY(client != INVALID_HANDLE_VALUE);
+  const auto closeClient = qScopeGuard([client] { CloseHandle(client); });
+
+  const HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  QVERIFY(stopEvent);
+  const auto closeStopEvent = qScopeGuard([stopEvent] { CloseHandle(stopEvent); });
+  QCOMPARE(service::connectEnhancedPipe(server, stopEvent), service::EnhancedPipeIoResult::Completed);
+
+  std::promise<service::EnhancedPipeIoResult> resultPromise;
+  auto result = resultPromise.get_future();
+  std::jthread reader([server, stopEvent, promise = std::move(resultPromise)]() mutable {
+    try {
+      std::array<std::byte, 1> buffer{};
+      promise.set_value(service::readEnhancedPipe(server, buffer, stopEvent));
+    } catch (...) {
+      promise.set_exception(std::current_exception());
+    }
+  });
+
+  QTest::qWait(10);
+  QVERIFY(SetEvent(stopEvent));
+  QCOMPARE(result.wait_for(std::chrono::seconds{1}), std::future_status::ready);
+  QCOMPARE(result.get(), service::EnhancedPipeIoResult::Stopped);
 }
 
 void WindowsPlatformIntegrationTests::singleInstanceForwardsTypedCommandsAcrossTrustedProcesses() {

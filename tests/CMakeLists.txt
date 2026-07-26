@@ -124,6 +124,7 @@ qt_add_executable(UwfApplicationUiBehaviorTests
         ../src/app/FileStagingConflictPolicy.cpp
         ../src/app/FileStagingStore.cpp
         ../src/service/EnhancedModeAgent.cpp
+        ../src/service/EnhancedModePipeIo.cpp
         ../src/service/EnhancedModeService.h
         ../src/service/EnhancedModeServiceControl.cpp
         ../src/util/ByteFormat.cpp
@@ -173,7 +174,6 @@ qt_add_executable(UwfApplicationUiBehaviorTests
         ../src/uwf/UwfSnapshot.cpp
         ../src/uwf/FileStagingCommitter.cpp
         ../src/uwf/FileStagingTask.cpp
-        ../src/uwf/FileStagingHandoff.cpp
         ../src/uwf/RegistryTreeCommitter.cpp
         ../src/uwf/api/UwfOverlay.cpp
         ../src/uwf/api/UwfFilter.cpp
@@ -244,6 +244,7 @@ if (WIN32)
             WindowsPlatformIntegrationTests.cpp
             ../src/app/ApplicationCommand.cpp
             ../src/app/SecureSingleInstance.cpp
+            ../src/service/EnhancedModePipeIo.cpp
             ../src/core/UwfModel.cpp
             ../src/ui/SystemInfoProvider.cpp
             ../src/util/DriveLetter.cpp

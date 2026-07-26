@@ -34,11 +34,6 @@ class QWidget;
 
 namespace uwf::ui {
 
-enum class FileStagingRequestOrigin {
-  UserCommand,
-  ServicePreshutdown,
-};
-
 struct FileStagingBatchResult {
   app::ApplicationCommandResult command;
   // 已成功读取的原始暂存列表。即使列表为空也保留 engaged 状态；nullopt
@@ -82,10 +77,10 @@ class FileStagingCoordinator final : public QObject {
   FileStagingCoordinator(WmiOperations& session, app::FileStagingStore& store, UwfCapability capability, QWidget* parentWindow, QObject* parent = nullptr);
   ~FileStagingCoordinator() override;
 
-  void requestCommit(FileStagingRequestOrigin origin, Completion completion);
+  void requestCommit(Completion completion);
   // 空 optional 表示已有批次拥有执行权；completedActiveBatch 已加入该批次，
   // 最终结果到达后协调器会把外部租约一并移交给调用方，使确认窗口期间仍
-  // 保持单飞所有权，不会出现服务重试抢先启动第二个提交批次。
+  // 保持单飞所有权，不会让同时到达的命令抢先启动第二个提交批次。
   [[nodiscard]] std::optional<ExternalBatch> reserveExternalBatch(ExternalCompletion completedActiveBatch);
   [[nodiscard]] bool active() const;
 
@@ -114,8 +109,7 @@ class FileStagingCoordinator final : public QObject {
     bool valid = false;
   };
 
-  [[nodiscard]] static const std::array<OwnershipTransition, static_cast<std::size_t>(Ownership::Count) *
-                                                                static_cast<std::size_t>(OwnershipEvent::Count)>&
+  [[nodiscard]] static const std::array<OwnershipTransition, static_cast<std::size_t>(Ownership::Count) * static_cast<std::size_t>(OwnershipEvent::Count)>&
   ownershipTransitions();
   void postOwnershipEvent(OwnershipEvent event);
   void startCommandBatch();

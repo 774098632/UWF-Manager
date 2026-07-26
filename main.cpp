@@ -14,6 +14,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <windows.h>
+
 #include <QApplication>
 #include <QCoreApplication>
 #include <QTimer>
@@ -39,6 +41,15 @@
 
 namespace {
 
+void restrictDllSearchPath() {
+  // Release 构建还通过 /DEPENDENTLOADFLAG:0x800 约束进入 main 前的静态
+  // 导入；这里负责之后没有显式 LOAD_LIBRARY_SEARCH 标志的动态加载。
+  // 正式包是单文件程序，不需要从应用目录、当前目录或 PATH 查找 DLL。
+  if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+    throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "restrict process DLL search path");
+  }
+}
+
 std::optional<int> handleSingleInstanceStartup(uwf::app::SecureSingleInstance& singleInstance, const uwf::app::StartupOptions& options) {
   // 单实例：已有实例在运行则切到它并退出，不再启动第二个窗口。放在最前面——
   // 系统检查等重活之前；若只是把任务转交给已有实例，没必要白做这些。
@@ -47,7 +58,7 @@ std::optional<int> handleSingleInstanceStartup(uwf::app::SecureSingleInstance& s
   if (acquireResult == uwf::app::SecureSingleInstance::AcquireResult::ForwardedExisting) {
     UWF_LOG_I("main") << "startup command forwarded to existing instance: command=" << static_cast<int>(options.initialCommand())
                       << " outcome=" << static_cast<int>(forwardedResult.outcome);
-    // CompletedWithFailures 是服务关机编排可以接受的“最终结果”，但对显式
+    // CompletedWithFailures 表示所有目标均已得到最终结果，但显式
     // --commit-stage 命令仍应返回非零退出码，不能向脚本隐藏逐项失败。
     return forwardedResult.outcome == uwf::app::ApplicationCommandOutcome::Succeeded ? EXIT_SUCCESS : EXIT_FAILURE;
   }
@@ -112,9 +123,8 @@ int runMainWindow(QApplication& app, uwf::app::SecureSingleInstance& singleInsta
 
   QObject::connect(&singleInstance, &uwf::app::SecureSingleInstance::activationRequested, &w, &uwf::ui::MainWindow::raiseToFront);
   QObject::connect(&singleInstance, &uwf::app::SecureSingleInstance::commitStageRequested, &w, [&](const std::uint64_t requestToken) {
-    w.requestFileStagingCommit(uwf::ui::FileStagingRequestOrigin::UserCommand, [&singleInstance, requestToken](const uwf::ui::FileStagingBatchResult& result) {
-      singleInstance.completeCommand(requestToken, result.command);
-    });
+    w.requestFileStagingCommit(
+        [&singleInstance, requestToken](const uwf::ui::FileStagingBatchResult& result) { singleInstance.completeCommand(requestToken, result.command); });
   });
   singleInstance.enableCommandNotifications();
 
@@ -130,7 +140,7 @@ int runMainWindow(QApplication& app, uwf::app::SecureSingleInstance& singleInsta
       UWF_LOG_I("main") << "startup mode selected: mode=commit-stage presentation=system-tray";
       w.startInTray();
       QTimer::singleShot(0, &w, [&app, &w] {
-        w.requestFileStagingCommit(uwf::ui::FileStagingRequestOrigin::UserCommand, [&app](const uwf::ui::FileStagingBatchResult& result) {
+        w.requestFileStagingCommit([&app](const uwf::ui::FileStagingBatchResult& result) {
           UWF_LOG_I("main") << "startup file staging command completed: outcome=" << static_cast<int>(result.command.outcome)
                             << " committed=" << result.command.committedFiles << " failures=" << result.command.failedFiles;
           app.exit(result.command.outcome == uwf::app::ApplicationCommandOutcome::Succeeded ? EXIT_SUCCESS : EXIT_FAILURE);
@@ -222,6 +232,7 @@ int runServiceControlCommand(int argc, char* argv[], const uwf::app::StartupMode
 
 int main(int argc, char* argv[]) {
   try {
+    restrictDllSearchPath();
     const auto options = uwf::app::parseStartupOptions(startupArguments(argc, argv));
     switch (options.mode) {
       case uwf::app::StartupMode::Service:

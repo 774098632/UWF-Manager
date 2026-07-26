@@ -20,20 +20,17 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
-#include <optional>
 #include <thread>
-#include <utility>
-
-#include "../app/ApplicationCommand.h"
 
 namespace uwf::service {
 
-// UI 进程与 LocalSystem 服务之间的认证代理边界。MainWindow 只依赖这个
-// 生命周期/消息契约；生产实现负责命名管道，其它宿主可以提供自己的传输，
-// 不必让 UI 编排知道 Windows I/O 细节。
+enum class EnhancedAgentControl : std::uint8_t;
+
+// UI 进程与 LocalSystem 服务之间的身份连接边界。管道不承载 UWF 提交任务；
+// 除维持双方身份外，只传递安全电源流程的一次性 PRESHUTDOWN 令牌状态。
 class EnhancedModeAgentConnection : public QObject {
   Q_OBJECT
  public:
@@ -43,17 +40,13 @@ class EnhancedModeAgentConnection : public QObject {
   virtual void start() = 0;
   virtual void stop() = 0;
   [[nodiscard]] virtual bool running() const = 0;
-  virtual void reportProgress(std::uint64_t requestId, std::size_t processed, std::size_t total) = 0;
-  virtual void complete(std::uint64_t requestId, const app::ApplicationCommandResult& result) = 0;
+  [[nodiscard]] virtual bool markPreshutdownCommitHandled() = 0;
+  [[nodiscard]] virtual bool requirePreshutdownCommit() = 0;
 
  signals:
-  void commitStageRequested(std::uint64_t requestId);
   void connectionStateChanged(bool connected);
 };
 
-// 交互式管理员进程中的服务代理。工作线程只负责经过身份认证的命名管道；
-// 真正的 UWF 任务通过信号回到 UI 线程。服务一次只发一个请求，因此响应槽
-// 同样保持单飞，不需要把并发协议复杂度泄露给业务层。
 class EnhancedModeAgent final : public EnhancedModeAgentConnection {
   Q_OBJECT
  public:
@@ -63,25 +56,20 @@ class EnhancedModeAgent final : public EnhancedModeAgentConnection {
   void start() override;
   void stop() override;
   [[nodiscard]] bool running() const override;
-  void reportProgress(std::uint64_t requestId, std::size_t processed, std::size_t total) override;
-  void complete(std::uint64_t requestId, const app::ApplicationCommandResult& result) override;
+  [[nodiscard]] bool markPreshutdownCommitHandled() override;
+  [[nodiscard]] bool requirePreshutdownCommit() override;
 
  private:
-  struct Response {
-    std::uint64_t requestId = 0;
-    app::ApplicationCommandResult result;
-  };
-
+  struct ControlChannel;
   void run(std::stop_token stopToken);
+  [[nodiscard]] bool sendControl(EnhancedAgentControl control);
   [[nodiscard]] bool waitBeforeReconnect(std::stop_token stopToken, std::chrono::milliseconds delay);
 
-  mutable std::mutex m_mutex;
-  std::condition_variable m_responseReady;
-  std::optional<std::uint64_t> m_activeRequestId;
-  std::optional<Response> m_response;
-  std::optional<std::pair<std::uint64_t, app::ApplicationCommandProgress>> m_progress;
+  std::mutex m_waitMutex;
+  std::condition_variable m_waitChanged;
   std::atomic_bool m_workerActive{false};
   std::jthread m_thread;
+  std::unique_ptr<ControlChannel> m_control;
 };
 
 }  // namespace uwf::service

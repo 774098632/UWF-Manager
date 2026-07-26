@@ -39,8 +39,8 @@ struct FileStagingTaskProgress {
 // 一次完整的文件暂存批次。准备阶段只在首次 pollPreparation() 时读取注册表、
 // Filter 和当前卷快照，先排除未受保护卷，再把文件系统扫描放到 jthread；
 // 提交阶段仍由拥有 WMI session 的线程逐项推进。PowerController、
-// --commit-stage 和服务请求共用这一个状态机，因而不会出现三套“哪些文件
-// 该提交、失败后是否继续”的口径。
+// --commit-stage 和服务内 PRESHUTDOWN worker 共用这一个状态机，因而不会
+// 出现三套“哪些文件该提交、失败后是否继续”的口径。
 class FileStagingTask final {
  public:
   FileStagingTask(WmiOperations& session, app::FileStagingStore& store, UwfCapability capability);

@@ -135,7 +135,22 @@ MainWindow::MainWindow(MainWindowServices services, MainWindowStartup startup, Q
   connect(m_overlayPresentation.get(), &OverlayPresentationController::activateMainWindowRequested, this, &MainWindow::raiseToFront);
   connect(m_overlayPresentation.get(), &OverlayPresentationController::exitApplicationRequested, this, &MainWindow::requestExit);
   m_fileStagingCoordinator = std::make_unique<FileStagingCoordinator>(m_session, m_fileStaging, m_uwfCapability, this);
-  m_power = std::make_unique<PowerController>(PowerControllerServices{m_session, m_fileStaging, m_uwfCapability, *m_fileStagingCoordinator}, this);
+  using PreshutdownControlResult = PowerControllerServices::PreshutdownControlResult;
+  PowerControllerServices::PreshutdownCommitControl preshutdown{
+      [this] {
+        if (!m_enhancedModeStatus.serviceContractSatisfied() || !m_enhancedModeAgent) return PreshutdownControlResult::NotApplicable;
+        return m_enhancedModeAgent->markPreshutdownCommitHandled() ? PreshutdownControlResult::Acknowledged : PreshutdownControlResult::Unacknowledged;
+      },
+      [this] {
+        if (!m_enhancedModeStatus.serviceContractSatisfied() || !m_enhancedModeAgent) return PreshutdownControlResult::NotApplicable;
+        return m_enhancedModeAgent->requirePreshutdownCommit() ? PreshutdownControlResult::Acknowledged : PreshutdownControlResult::Unacknowledged;
+      }};
+  m_power = std::make_unique<PowerController>(PowerControllerServices{.session = m_session,
+                                                                      .fileStaging = m_fileStaging,
+                                                                      .uwfCapability = m_uwfCapability,
+                                                                      .stagingCoordinator = *m_fileStagingCoordinator,
+                                                                      .preshutdown = std::move(preshutdown)},
+                                              this);
   connect(m_overlayPresentation.get(), &OverlayPresentationController::safeShutdownRequested, m_power.get(), &PowerController::safeShutdown);
   connect(m_overlayPresentation.get(), &OverlayPresentationController::safeRestartRequested, m_power.get(), &PowerController::safeRestart);
 
@@ -155,20 +170,13 @@ MainWindow::MainWindow(MainWindowServices services, MainWindowStartup startup, Q
       m_enhancedModeStatus.agentState = state;
       refreshThemedUi();
     });
-    connect(m_enhancedModeAgent, &service::EnhancedModeAgent::connectionStateChanged, this, [this](const bool connected) {
+    connect(m_enhancedModeAgent, &service::EnhancedModeAgentConnection::connectionStateChanged, this, [this](const bool connected) {
       if (!m_enhancedModeManager || !m_enhancedModeStatus.serviceContractSatisfied()) return;
       m_enhancedModeManager->setAgentState(connected ? service::EnhancedModeAgentState::Connected : service::EnhancedModeAgentState::Disconnected);
-      refreshEnhancedModeStatus();
-    });
-    connect(m_enhancedModeAgent, &service::EnhancedModeAgent::commitStageRequested, this, [this](const std::uint64_t requestId) {
-      m_serviceCommitRequestId = requestId;
-      requestFileStagingCommit(FileStagingRequestOrigin::ServicePreshutdown, [this, requestId](const FileStagingBatchResult& result) {
-        if (m_serviceCommitRequestId == requestId) m_serviceCommitRequestId.reset();
-        m_enhancedModeAgent->complete(requestId, result.command);
-      });
-    });
-    connect(m_fileStagingCoordinator.get(), &FileStagingCoordinator::progressChanged, this, [this](const std::size_t processed, const std::size_t total) {
-      if (m_serviceCommitRequestId) m_enhancedModeAgent->reportProgress(*m_serviceCommitRequestId, processed, total);
+      // 身份连接只改变代理状态，不改变 SCM 服务契约。连接成功时直接使用
+      // 已有快照，不能在 UI 线程重复查询 SCM；断开才异步复核一次，以识别
+      // 服务异常退出，同时避免在代理信号回调栈中阻塞界面。
+      if (!connected) QTimer::singleShot(0, this, &MainWindow::refreshEnhancedModeStatus);
     });
     refreshEnhancedModeStatus();
   }
@@ -208,9 +216,7 @@ void MainWindow::startInTray() {
 
 void MainWindow::raiseToFront() { m_chrome->raiseToFront(m_firstShowDone); }
 
-void MainWindow::requestFileStagingCommit(const FileStagingRequestOrigin origin, FileStagingCoordinator::Completion completion) {
-  m_fileStagingCoordinator->requestCommit(origin, std::move(completion));
-}
+void MainWindow::requestFileStagingCommit(FileStagingCoordinator::Completion completion) { m_fileStagingCoordinator->requestCommit(std::move(completion)); }
 
 void MainWindow::refreshEnhancedModeStatus() {
   if (!m_enhancedModeManager) return;
@@ -226,7 +232,7 @@ void MainWindow::refreshEnhancedModeStatus() {
 void MainWindow::recordEnhancedModeStatusFailure(const QString& detail) {
   // 查询失败只说明 SCM 当前不可观测，不能反推出服务已经消失。保留最后一次
   // 已确认的工件和代理所有权，仅把展示降级并重试；否则一次瞬时错误就会主动
-  // 断开健康代理，且 PRESHUTDOWN 拉起的 --quiet 实例会被单实例转交后立即退出。
+  // 断开健康代理，使服务身份状态与真实连接发生不必要的抖动。
   m_enhancedModeStatus.state = service::EnhancedModeState::RepairRequired;
   m_enhancedModeStatus.detail = detail;
   refreshThemedUi();
@@ -244,8 +250,11 @@ void MainWindow::applyEnhancedModeStatus(const service::EnhancedModeStatus& stat
     // LocalSystem 独立进程、接受预关机事件并具备启动用户进程所需权限。
     // 对损坏配置持续重连只会掩盖“需要修复”的真实状态。
     if (status.serviceContractSatisfied()) {
-      if (!m_enhancedModeAgent->running()) m_enhancedModeManager->setAgentState(service::EnhancedModeAgentState::Connecting);
-      m_enhancedModeAgent->start();
+      if (!m_enhancedModeAgent->running()) {
+        m_enhancedModeManager->setAgentState(service::EnhancedModeAgentState::Connecting);
+        m_enhancedModeAgent->start();
+        if (!m_enhancedModeAgent->running()) m_enhancedModeManager->setAgentState(service::EnhancedModeAgentState::Disconnected);
+      }
     } else {
       m_enhancedModeAgent->stop();
       m_enhancedModeManager->setAgentState(service::EnhancedModeAgentState::Unobserved);
