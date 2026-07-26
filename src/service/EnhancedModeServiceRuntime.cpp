@@ -22,17 +22,20 @@
 #include <wtsapi32.h>
 // clang-format on
 
+#include <QScopeGuard>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <future>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -43,6 +46,7 @@
 
 #include "../app/FileStagingStore.h"
 #include "../util/Log.h"
+#include "../util/StringUtil.h"
 #include "../uwf/FileStagingTask.h"
 #include "../uwf/UwfSnapshot.h"
 #include "../uwf/wmi/WmiClient.h"
@@ -330,9 +334,11 @@ struct AgentLaunchResult {
 };
 
 FileStagingCommitResult commitStagedFiles() {
-  // WMI session 是 thread_local；在实际执行提交的工作线程内创建并销毁该线程
-  // 的 COM/WMI 上下文，避免跨线程借用 UI 或服务主线程的 COM apartment。
+  // 提交任务在自己的工作线程内使用该线程唯一的 WMI 上下文。作用域守卫会在
+  // result 完整构造后、函数真正返回前主动释放 COM/WMI，避免把代理释放拖到
+  // CRT 的线程退出清理阶段。
   initializeWmiRuntime();
+  const auto shutdownWmi = qScopeGuard([] { shutdownWmiRuntime(); });
   auto& session = embeddedWmiSession();
   const auto capability = probeUwfCapability(session);
   app::RegistryFileStagingStore store(session, capability);
@@ -340,6 +346,108 @@ FileStagingCommitResult commitStagedFiles() {
   while (!task.pollPreparation()) std::this_thread::sleep_for(kCommitPreparationPollInterval);
   while (!task.finished()) static_cast<void>(task.advance());
   return task.result();
+}
+
+void writePreshutdownDiagnostic([[maybe_unused]] const std::string_view result) noexcept {
+#if defined(UWF_DEBUG_LOGGING)
+  constexpr char kPreshutdownDiagnosticPath[] = R"(D:\UWFManagerPreshutdownCommit.txt)";
+  std::wstring diagnosticPath;
+  std::wstring temporaryPath;
+  try {
+    diagnosticPath = utf8ToWide(kPreshutdownDiagnosticPath);
+    SYSTEMTIME completed{};
+    GetLocalTime(&completed);
+    std::ostringstream content;
+    content << "UWF Manager enhanced mode preshutdown diagnostic\n"
+            << "completedLocal=" << std::setfill('0') << std::setw(4) << completed.wYear << '-' << std::setw(2) << completed.wMonth << '-' << std::setw(2)
+            << completed.wDay << 'T' << std::setw(2) << completed.wHour << ':' << std::setw(2) << completed.wMinute << ':' << std::setw(2) << completed.wSecond
+            << '.' << std::setw(3) << completed.wMilliseconds << '\n'
+            << result;
+    const std::string bytes = content.str();
+
+    UniqueHandle file;
+    for (unsigned int attempt = 0; attempt < 32; ++attempt) {
+      temporaryPath =
+          diagnosticPath + L"." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(GetTickCount64()) + L"." + std::to_wstring(attempt) + L".tmp";
+      file.reset(CreateFileW(temporaryPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
+                             FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, nullptr));
+      if (file.valid()) break;
+      const DWORD error = GetLastError();
+      if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
+        throwSystemError("create preshutdown diagnostic temporary file", error);
+      }
+    }
+    if (!file.valid()) throw std::runtime_error("create a unique preshutdown diagnostic temporary file");
+
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+      const DWORD requested = static_cast<DWORD>(std::min(bytes.size() - offset, static_cast<std::size_t>(std::numeric_limits<DWORD>::max())));
+      DWORD written = 0;
+      if (!WriteFile(file.get(), bytes.data() + offset, requested, &written, nullptr) || written == 0) {
+        throwSystemError("write preshutdown diagnostic temporary file");
+      }
+      offset += static_cast<std::size_t>(written);
+    }
+    if (!FlushFileBuffers(file.get())) throwSystemError("flush preshutdown diagnostic temporary file");
+
+    // 固定文件名可能已被低权限用户布置成重解析点或硬链接。先写独占创建的
+    // 同卷临时文件，再在写句柄仍阻止第三方写入时以目录项替换完成发布，
+    // 绝不打开既有目标写入。
+    if (!MoveFileExW(temporaryPath.c_str(), diagnosticPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+      throwSystemError("publish preshutdown diagnostic file");
+    }
+    file.reset();
+    temporaryPath.clear();
+  } catch (const std::exception& error) {
+    if (!temporaryPath.empty()) DeleteFileW(temporaryPath.c_str());
+    try {
+      UWF_LOG_W("service") << "enhanced mode preshutdown diagnostic could not be written: path=" << kPreshutdownDiagnosticPath << " error=" << error.what();
+    } catch (...) {
+    }
+  } catch (...) {
+    if (!temporaryPath.empty()) DeleteFileW(temporaryPath.c_str());
+    try {
+      UWF_LOG_W("service") << "enhanced mode preshutdown diagnostic could not be written: path=" << kPreshutdownDiagnosticPath
+                           << " error=non-standard-exception";
+    } catch (...) {
+    }
+  }
+#endif
+}
+
+void writePreshutdownDiagnostic([[maybe_unused]] const FileStagingCommitResult& result) noexcept {
+#if defined(UWF_DEBUG_LOGGING)
+  try {
+    std::ostringstream diagnostic;
+    diagnostic << "outcome=completed\n"
+               << "discoveredFiles=" << result.discoveredFiles << '\n'
+               << "committedFiles=" << result.committedFiles << '\n'
+               << "skippedFiles=" << result.skippedFiles << '\n'
+               << "skippedEntries=" << result.skippedEntries << '\n'
+               << "failures=" << result.failures.size() << '\n';
+    for (qsizetype index = 0; index < result.failures.size(); ++index) {
+      const auto& failure = result.failures.at(index);
+      diagnostic << "failure[" << index << "].path=" << failure.path.toStdString() << '\n'
+                 << "failure[" << index << "].reason=" << static_cast<int>(failure.kind) << '\n'
+                 << "failure[" << index << "].error=" << failure.detail.toStdString() << '\n';
+    }
+    writePreshutdownDiagnostic(diagnostic.str());
+  } catch (...) {
+    writePreshutdownDiagnostic("outcome=diagnostic-format-failed\n");
+  }
+#endif
+}
+
+void writePreshutdownFailureDiagnostic([[maybe_unused]] const char* error) noexcept {
+#if defined(UWF_DEBUG_LOGGING)
+  try {
+    std::ostringstream diagnostic;
+    diagnostic << "outcome=failed-before-final-result\nerror=" << (error ? error : "non-standard-exception") << '\n';
+    writePreshutdownDiagnostic(diagnostic.str());
+  } catch (...) {
+    writePreshutdownDiagnostic("outcome=diagnostic-format-failed\n");
+  }
+#endif
 }
 
 class ServiceRuntime final {
@@ -728,6 +836,7 @@ class ServiceRuntime final {
   void runPreshutdownCommit() {
     if (consumePreshutdownCommitHandled()) {
       UWF_LOG_I("service") << "enhanced mode staged commit skipped: reason=recent-ui-precommit";
+      writePreshutdownDiagnostic("outcome=skipped\nreason=recent-ui-precommit\n");
       return;
     }
 
@@ -754,6 +863,7 @@ class ServiceRuntime final {
         UWF_LOG_W("service") << "enhanced mode SCM heartbeat failed while staged commit continues: error=non-standard-exception";
       }
     }
+    worker.join();
     try {
       const auto result = resultFuture.get();
       UWF_LOG_I("service") << "enhanced mode staged commit completed: discovered=" << result.discoveredFiles << " committed=" << result.committedFiles
@@ -762,12 +872,14 @@ class ServiceRuntime final {
         UWF_LOG_E("service") << "enhanced mode staged commit item failed: path=" << failure.path.toStdString() << " reason=" << static_cast<int>(failure.kind)
                              << " error=" << failure.detail.toStdString();
       }
+      writePreshutdownDiagnostic(result);
     } catch (const std::exception& error) {
       UWF_LOG_E("service") << "enhanced mode staged commit failed before producing a final batch result: error=" << error.what();
+      writePreshutdownFailureDiagnostic(error.what());
     } catch (...) {
       UWF_LOG_E("service") << "enhanced mode staged commit failed before producing a final batch result: error=non-standard-exception";
+      writePreshutdownFailureDiagnostic(nullptr);
     }
-    worker.join();
   }
 
   void stopInfrastructure() {

@@ -253,10 +253,7 @@
     <message><source>File staging is unavailable: %1</source><translation>文件暂存不可用：%1</translation></message>
     <message><source>Committed automatically before safe shutdown or restart.</source><translation>将在安全关机或重启前自动提交。</translation></message>
     <message><source>%1 staged entries · %2 files · %3 folders</source><translation>%1 个暂存项 · %2 个文件 · %3 个文件夹</translation></message>
-    <message>
-        <source>Required by UWF for File staging: UWF Manager maintains this exclusion so the staged-path list persists across protected sessions.</source>
-        <translation>UWF 文件暂存功能需要此项：UWF Manager 会维护该排除项，确保暂存路径列表在受保护会话之间保持有效。</translation>
-    </message>
+    <message><source>Required by UWF for File staging.</source><translation>UWF 文件暂存功能需要此项。</translation></message>
     <message>
         <source>The UWF filter is currently disabled; no overlay changes have been accumulated, so there is nothing to commit.</source>
         <translation>UWF 筛选器当前已停用，覆盖层中不会累积修改，没有可提交的内容。</translation>
@@ -1016,7 +1013,7 @@ Continue and discard them?</source><translation>还有 %1 个待应用变更尚�
     <message><source>Operational and security considerations</source><translation>运行与安全注意事项</translation></message>
     <message><source>Registers a service in the system registry when enhanced mode is enabled, so the application no longer remains fully portable</source><translation>启用增强模式后会在系统注册表注册服务，打破纯绿色运行的约束</translation></message>
     <message><source>A large number of staged files can significantly extend shutdown or restart; allow UWF Manager enough time to preserve user changes</source><translation>暂存区包含大量文件时，关机或重启耗时可能显著增加；UWF Manager 需要充足时间完成用户变更的持久化</translation></message>
-    <message><source>Enhanced mode runs this application (UWF Manager) as SYSTEM. If a non-administrator tampers with the application or replaces it with a malicious binary, privileges could be elevated to SYSTEM. Enable enhanced mode only from an administrator-protected location (recommended location: %ProgramFiles%\UWF Manager\Service\UWF.exe)</source><translation>增强模式会以 SYSTEM 身份运行本程序（UWF Manager）。如果该程序被非管理员用户篡改或者替换为恶意二进制文件可能导致权限提升至 SYSTEM，请仅在受管理员权限保护的位置启用增强模式（建议拷贝本程序至系统保护的目录：%ProgramFiles%\UWF Manager\Service\UWF.exe）</translation></message>
+    <message><source>Enhanced mode runs this application (UWF Manager) as SYSTEM. If a non-administrator tampers with the application or replaces it with a malicious binary, privileges could be elevated to SYSTEM. Enable enhanced mode only from an administrator-protected location (recommended location: %ProgramFiles%\UWF Manager\Service\UWF.exe)</source><translation>增强模式会以 SYSTEM 身份运行本程序。如果程序被非管理员用户篡改或者被替换为恶意二进制文件，可能导致恶意程序权限提升至 SYSTEM。请仅在受管理员权限保护的位置启用增强模式（建议拷贝本程序至系统保护的目录：%ProgramFiles%\UWF Manager\Service\UWF.exe 运行）</translation></message>
     <message><source>Enhanced mode status could not be read</source><translation>无法读取增强模式状态</translation></message>
     <message><source>The enhanced mode status read failed because of an unknown error.</source><translation>读取增强模式状态时发生未知错误。</translation></message>
     <message><source>The current service state could not be read:

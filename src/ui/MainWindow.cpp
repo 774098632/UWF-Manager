@@ -192,7 +192,7 @@ MainWindow::MainWindow(MainWindowServices services, MainWindowStartup startup, Q
 }
 
 MainWindow::~MainWindow() {
-  // thread_local WMI session 本身会在 UI 线程退出时统一释放。
+  // WMI 运行时守卫在 MainWindow 销毁后才释放本线程 session。
   m_commit.reset();
 
   if (m_enhancedModeAgent) {

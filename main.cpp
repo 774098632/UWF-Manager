@@ -18,6 +18,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QScopeGuard>
 #include <QTimer>
 #include <cstdint>
 #include <cstdlib>
@@ -167,9 +168,10 @@ int runApplication(int argc, char* argv[], const uwf::app::StartupOptions& optio
   initializeUserInterface(app);
   UWF_LOG_I("main") << "application started: pid=" << QCoreApplication::applicationPid();
   const auto check = checkRuntimeEnvironment();
-  // 尽早建立主线程 COM apartment 与两个长生命周期 WMI session。初始化失败
-  // 直接交给 main 的最终异常边界记录并终止启动，不让半初始化 UI 继续运行。
+  // WMI 运行时守卫覆盖完整 UI 事件循环。窗口及其控制器先销毁，随后守卫在
+  // 普通栈展开阶段主动释放本线程 WMI 代理与 COM apartment，不等待 TLS 清理。
   uwf::initializeWmiRuntime();
+  const auto shutdownWmi = qScopeGuard([] { uwf::shutdownWmiRuntime(); });
   // 兼容模式只表达“系统不在官方支持清单中”，不能替代实际能力探测。用户
   // 仍可能自行安装 UWF 驱动与 provider，因此所有系统都以 Embedded namespace
   // 和 UWF_Filter 的真实注册状态决定功能是否可用。
@@ -203,6 +205,7 @@ int runServiceControlCommand(int argc, char* argv[], const uwf::app::StartupMode
   app.setApplicationName("UWF Manager");
   (void)uwf::ui::I18n::instance();
   uwf::initializeWmiRuntime();
+  const auto shutdownWmi = qScopeGuard([] { uwf::shutdownWmiRuntime(); });
   const auto capability = uwf::probeUwfCapability();
   uwf::service::WindowsEnhancedModeServiceControl serviceControl;
   uwf::service::EnhancedModeManager manager(serviceControl, uwf::embeddedWmiSession(), capability);

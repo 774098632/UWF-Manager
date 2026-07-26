@@ -32,6 +32,7 @@
 #include <limits>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -1179,15 +1180,23 @@ struct WmiThreadContext {
 
 namespace {
 
+thread_local std::optional<WmiThreadContext> threadContextStorage;
+thread_local bool threadContextRetired = false;
+
 WmiThreadContext& threadContext() {
-  thread_local WmiThreadContext context;
-  return context;
+  if (threadContextRetired) throw std::logic_error("WMI thread context was already destroyed");
+  if (!threadContextStorage) threadContextStorage.emplace();
+  return *threadContextStorage;
 }
 
 }  // namespace
 
 WmiSession& embeddedWmiSession() { return threadContext().embedded; }
 WmiSession& cimv2WmiSession() { return threadContext().cimv2; }
-void initializeWmiRuntime() { (void)threadContext(); }
+void initializeWmiRuntime() { static_cast<void>(threadContext()); }
+void shutdownWmiRuntime() noexcept {
+  threadContextStorage.reset();
+  threadContextRetired = true;
+}
 
 }  // namespace uwf

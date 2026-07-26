@@ -868,9 +868,7 @@ void ExclusionListWidget::rebuild() {
       else {
         tip += I18n::tr("Registry: %1").arg(full) + '\n';
         if (isFileStagingRegistryRoot(full)) {
-          tip +=
-              I18n::tr("Required by UWF for File staging: UWF Manager maintains this exclusion so the staged-path list persists across protected sessions.") +
-              '\n';
+          tip += I18n::tr("Required by UWF for File staging.") + '\n';
         }
       }
     }

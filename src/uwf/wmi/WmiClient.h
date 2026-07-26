@@ -169,13 +169,15 @@ class WmiSession final : public WmiOperations {
 };
 
 // 每个线程各自拥有两个固定 namespace 的长生命周期 session。首次访问会初始化
-// 当前线程的 COM apartment；线程退出时先释放 session，再成对 CoUninitialize。
-// 返回的引用不得跨线程传递；session 会在所有操作入口校验其创建线程。
+// 当前线程的 COM apartment。生产线程必须在业务对象销毁后调用
+// shutdownWmiRuntime()；TLS 析构只负责异常终止等未走到显式边界的兜底清理。
+// 一旦显式销毁，本线程上下文永久退休，后续访问会抛出生命周期错误而不会重建。
 WmiSession& embeddedWmiSession();
 WmiSession& cimv2WmiSession();
 
-// 在启动线程显式建立 COM apartment 与进程安全策略。失败抛出异常，由进程或
-// 线程入口统一决定日志和用户提示策略。
+// 建立/销毁当前线程唯一的 COM/WMI 上下文。调用方在线程入口初始化，并用已有
+// 的作用域守卫保证在线程函数返回前销毁。
 void initializeWmiRuntime();
+void shutdownWmiRuntime() noexcept;
 
 }  // namespace uwf

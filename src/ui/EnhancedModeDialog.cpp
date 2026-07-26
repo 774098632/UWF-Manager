@@ -157,10 +157,8 @@ void renderIssueLabel(QLabel& label, const QString& text, const QColor& color) {
   label.setText(text);
   label.setVisible(!text.isEmpty());
   const auto& theme = ThemeManager::instance();
-  label.setStyleSheet(
-      QStringLiteral("QLabel#enhancedModeIssue { color: %1; background: %2; border: 1px solid %3; border-left: 3px solid %4; "
-                     "border-radius: 8px; padding: 10px 12px; }")
-          .arg(theme.color(Sem::Fg).name(), translucentBackground(color, theme.isLight() ? 10 : 18), theme.color(Sem::Border).name(), color.name()));
+  label.setStyleSheet(QStringLiteral("QLabel#enhancedModeIssue { color: %1; background: %2; border: 1px solid %3; border-radius: 8px; padding: 10px 12px; }")
+                          .arg(theme.color(Sem::Fg).name(), translucentBackground(color, theme.isLight() ? 10 : 18), theme.color(Sem::Border).name()));
 }
 
 QWidget* createChangeRow(QWidget* parent, const int number, const QString& text) {

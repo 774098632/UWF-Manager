@@ -31,6 +31,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QTextStream>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -134,6 +135,8 @@ void normalizeOverlayEntry(const QString& driveLetter, OverlayFileEntry& e) {
 
 QVector<OverlayFileEntry> loadOverlayFilesFromSystem(const QString& driveLetter, const std::stop_token stopToken) {
   if (stopToken.stop_requested()) return {};
+  initializeWmiRuntime();
+  const auto shutdownWmi = qScopeGuard([] { shutdownWmiRuntime(); });
   auto& session = embeddedWmiSession();
   session.ensureConnected();
   api::UwfOverlay overlay(session);
@@ -281,10 +284,10 @@ OverlayFilesDialog::OverlayFilesDialog(const QString& driveLetter, OverlayFilesS
 OverlayFilesDialog::~OverlayFilesDialog() { m_worker.request_stop(); }
 
 void OverlayFilesDialog::startLoading() {
-  // worker 线程首次取得 embeddedWmiSession() 时会创建该线程的 COM apartment
-  // 与长期 session。GetOverlayFiles 使用 WMI 原生异步调用，stop_token 会唤醒
-  // worker 并在同一线程执行 CancelAsyncCall，不存在“取消发生在同步调用之前”
-  // 的竞态。结果用 QMetaObject::invokeMethod 投回 UI 线程。
+  // 生产 loader 在 worker 内建立并显式销毁该线程的 COM/WMI 上下文。
+  // GetOverlayFiles 使用 WMI 原生异步调用，stop_token 会唤醒 worker 并在同一
+  // 线程执行 CancelAsyncCall，不存在“取消发生在同步调用之前”的竞态。结果用
+  // QMetaObject::invokeMethod 投回 UI 线程。
   QPointer<OverlayFilesDialog> self(this);
   const QString driveLetter = m_driveLetter;
   const OverlayFileLoader loader = m_loader;

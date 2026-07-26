@@ -51,6 +51,7 @@ class WindowsPlatformIntegrationTests final : public QObject {
   void windowsAndHardwareMetadataRemainInternallyConsistent();
   void cimv2TransportDistinguishesPresentAndMissingClasses();
   void embeddedCapabilityAndSnapshotUseTheProductionTransport();
+  void explicitWmiShutdownRetiresTheWorkerContext();
   void enhancedModePipeReadIsCancelledByStopEvent();
   void singleInstanceForwardsTypedCommandsAcrossTrustedProcesses();
 };
@@ -122,6 +123,41 @@ void WindowsPlatformIntegrationTests::embeddedCapabilityAndSnapshotUseTheProduct
   } catch (...) {
     QFAIL("Embedded WMI transport raised a non-standard exception");
   }
+}
+
+void WindowsPlatformIntegrationTests::explicitWmiShutdownRetiresTheWorkerContext() {
+  std::promise<QString> outcomePromise;
+  auto outcome = outcomePromise.get_future();
+  std::jthread worker([promise = std::move(outcomePromise)]() mutable {
+    try {
+      {
+        initializeWmiRuntime();
+        const auto shutdownWmi = qScopeGuard([] { shutdownWmiRuntime(); });
+        auto* const firstSession = &cimv2WmiSession();
+        firstSession->ensureConnected();
+        initializeWmiRuntime();
+        if (&cimv2WmiSession() != firstSession) {
+          promise.set_value(QStringLiteral("active WMI context was replaced"));
+          return;
+        }
+      }
+
+      try {
+        static_cast<void>(cimv2WmiSession());
+        promise.set_value(QStringLiteral("retired WMI context was recreated"));
+      } catch (const std::logic_error&) {
+        promise.set_value({});
+      }
+    } catch (const std::exception& error) {
+      promise.set_value(QString::fromUtf8(error.what()));
+    } catch (...) {
+      promise.set_value(QStringLiteral("worker raised a non-standard exception"));
+    }
+  });
+
+  worker.join();
+  const QString error = outcome.get();
+  QVERIFY2(error.isEmpty(), qPrintable(error));
 }
 
 void WindowsPlatformIntegrationTests::enhancedModePipeReadIsCancelledByStopEvent() {
@@ -245,6 +281,8 @@ int main(int argc, char** argv) {
   if (arguments.size() >= 2 && arguments[1] == QStringLiteral("--single-instance-test-client")) {
     return runSingleInstanceClient(arguments);
   }
+  uwf::initializeWmiRuntime();
+  const auto shutdownWmi = qScopeGuard([] { uwf::shutdownWmiRuntime(); });
   uwf::WindowsPlatformIntegrationTests tests;
   return QTest::qExec(&tests, argc, argv);
 }
