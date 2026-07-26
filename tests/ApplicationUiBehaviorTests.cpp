@@ -19,13 +19,18 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
+#include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QImage>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPainter>
+#include <QPlainTextEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -35,18 +40,33 @@
 #include <QTemporaryFile>
 #include <QTextEdit>
 #include <QTimer>
+#include <QUuid>
 #include <QtTest>
+#include <algorithm>
+#include <array>
 #include <deque>
+#include <exception>
+#include <functional>
 #include <memory>
+#include <stop_token>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include "app/FileStagingStore.h"
+#include "app/FileStagingConflictPolicy.h"
 #include "core/UwfModel.h"
+#include "service/EnhancedModeAgent.h"
+#include "service/EnhancedModeService.h"
 #include "ui/AboutDialog.h"
 #include "ui/ApplyPlanDialog.h"
 #include "ui/CommitBatch.h"
 #include "ui/CommitDispatcher.h"
 #include "ui/Dialogs.h"
 #include "ui/DiskTab.h"
+#include "ui/EnhancedModeDialog.h"
+#include "ui/FileStagingCoordinator.h"
+#include "ui/FileStagingWidget.h"
 #include "ui/GlobalStatusPanel.h"
 #include "ui/I18n.h"
 #include "ui/ImportApplier.h"
@@ -60,8 +80,14 @@
 #include "ui/StatusBanner.h"
 #include "ui/ThemeManager.h"
 #include "ui/UiUtil.h"
+#include "util/DriveLetter.h"
 #include "util/Log.h"
+#include "uwf/FileStagingCommitter.h"
+#include "uwf/FileStagingHandoff.h"
+#include "uwf/FileStagingTask.h"
+#include "uwf/RegistryTreeCommitter.h"
 #include "uwf/api/UwfmgrCli.h"
+#include "uwf/wmi/WmiError.h"
 #include "uwf/wmi/WmiException.h"
 
 namespace {
@@ -100,13 +126,32 @@ core::UwfSnapshot editableSnapshot() {
   return snapshot;
 }
 
+service::EnhancedModeStatus completeEnhancedModeStatus() {
+  return {.state = service::EnhancedModeState::Enabled,
+          .serviceExists = true,
+          .ownProcess = true,
+          .automaticStart = true,
+          .localSystemAccount = true,
+          .running = true,
+          .executableMatches = true,
+          .preshutdownTimeoutConfigured = true,
+          .requiredPrivilegesConfigured = true,
+          .preshutdownAccepted = true,
+          .serviceRegistryPresent = true,
+          .agentState = service::EnhancedModeAgentState::Unobserved,
+          .detail = {}};
+}
+
 class RecordingWmiOperations final : public WmiOperations {
  public:
   mutable std::deque<std::vector<WmiRow>> queryResults;
   mutable std::deque<WmiRow> objectResults;
+  mutable std::deque<WmiMethodOutput> readResults;
   mutable std::vector<QString> invocations;
   mutable std::vector<QString> invocationPaths;
   mutable std::vector<WmiRow> invocationInputs;
+  mutable std::exception_ptr invocationFailure;
+  std::function<void()> invocationObserver;
   QString connectionFailure;
 
   void ensureConnected() const override {
@@ -122,12 +167,17 @@ class RecordingWmiOperations final : public WmiOperations {
     return row;
   }
   void invokeMethod(const std::string& path, const std::string& method, const WmiRow& inputs) const override {
+    if (invocationObserver) invocationObserver();
     invocationPaths.push_back(QString::fromStdString(path));
     invocations.push_back(QString::fromStdString(method));
     invocationInputs.push_back(inputs);
+    if (invocationFailure) std::rethrow_exception(std::exchange(invocationFailure, std::exception_ptr{}));
   }
   WmiMethodOutput callMethodRead(const std::string&, const std::string&, const WmiRow&) const override {
-    throw std::runtime_error("unexpected callMethodRead");
+    if (readResults.empty()) throw std::runtime_error("unexpected callMethodRead");
+    auto result = std::move(readResults.front());
+    readResults.pop_front();
+    return result;
   }
   WmiMethodOutput callMethodReadCancelable(const std::string&, const std::string&, const WmiRow&, std::stop_token) const override {
     throw std::runtime_error("unexpected callMethodReadCancelable");
@@ -168,6 +218,111 @@ class MemoryFileDialogs final : public ui::dialogs::FileDialogProvider {
   }
 };
 
+class MemoryFileStagingStore final : public app::FileStagingStore {
+ public:
+  QList<app::FileStagingEntry> entries;
+  QString readFailure;
+  QString writeFailure;
+  int writes = 0;
+
+  [[nodiscard]] QList<app::FileStagingEntry> load() const override {
+    if (!readFailure.isEmpty()) throw std::runtime_error(readFailure.toStdString());
+    return entries;
+  }
+
+  void replace(const QList<app::FileStagingEntry>& replacement) override {
+    if (!writeFailure.isEmpty()) throw std::runtime_error(writeFailure.toStdString());
+    entries = replacement;
+    ++writes;
+  }
+};
+
+class MemoryEnhancedModeServiceControl final : public service::EnhancedModeServiceControl {
+ public:
+  class Barrier final : public DeletionBarrier {
+   public:
+    explicit Barrier(MemoryEnhancedModeServiceControl& owner) : m_owner(owner) { ++m_owner.activeDeletionBarriers; }
+    ~Barrier() override { --m_owner.activeDeletionBarriers; }
+
+   private:
+    MemoryEnhancedModeServiceControl& m_owner;
+  };
+
+  service::EnhancedModeStatus current;
+  QString queryFailure;
+  int installs = 0;
+  int starts = 0;
+  int removals = 0;
+  int activeDeletionBarriers = 0;
+  mutable int queries = 0;
+  mutable bool queriedDuringDeletion = false;
+  std::vector<RegistryCommitTarget> installationPlan;
+  std::vector<RegistryCommitTarget> deletionPlan;
+  QString installedDescription;
+
+  [[nodiscard]] service::EnhancedModeStatus query() const override {
+    ++queries;
+    if (!queryFailure.isEmpty()) throw std::runtime_error(queryFailure.toStdString());
+    if (activeDeletionBarriers != 0) queriedDuringDeletion = true;
+    return current;
+  }
+  void installAndStart(const QString& description) override {
+    ++installs;
+    installedDescription = description;
+    current = completeEnhancedModeStatus();
+  }
+  void start() override {
+    ++starts;
+    current.running = true;
+    current.preshutdownAccepted = true;
+    current.state = current.serviceContractSatisfied() ? service::EnhancedModeState::Enabled : service::EnhancedModeState::RepairRequired;
+  }
+  [[nodiscard]] std::vector<RegistryCommitTarget> planRegistryCommit() const override { return installationPlan; }
+  [[nodiscard]] std::vector<RegistryCommitTarget> planRegistryDeletion() const override { return deletionPlan; }
+  void deleteRegistryRemnants() override { current.serviceRegistryPresent = false; }
+  [[nodiscard]] Removal stopAndMarkForDeletion() override {
+    ++removals;
+    current = {};
+    return {RemovalState::MarkedForDeletion, std::make_unique<Barrier>(*this)};
+  }
+};
+
+class MemoryEnhancedModeAgent final : public service::EnhancedModeAgentConnection {
+ public:
+  int starts = 0;
+  int stops = 0;
+  std::vector<std::uint64_t> completedRequests;
+  std::vector<app::ApplicationCommandResult> completedResults;
+  std::vector<std::uint64_t> progressRequests;
+
+  void start() override {
+    if (m_running) return;
+    m_running = true;
+    ++starts;
+  }
+
+  void stop() override {
+    if (!m_running) return;
+    m_running = false;
+    ++stops;
+  }
+
+  [[nodiscard]] bool running() const override { return m_running; }
+
+  void reportProgress(const std::uint64_t requestId, std::size_t, std::size_t) override { progressRequests.push_back(requestId); }
+
+  void complete(const std::uint64_t requestId, const app::ApplicationCommandResult& result) override {
+    completedRequests.push_back(requestId);
+    completedResults.push_back(result);
+  }
+
+  void requestCommit(const std::uint64_t requestId) { emit commitStageRequested(requestId); }
+  void publishConnectionState(const bool connected) { emit connectionStateChanged(connected); }
+
+ private:
+  bool m_running = false;
+};
+
 class MutableApplicationStateSource final : public ui::ApplicationStateSource {
  public:
   std::vector<core::DiskInfo> disks;
@@ -182,6 +337,25 @@ class MutableApplicationStateSource final : public ui::ApplicationStateSource {
   }
 };
 
+FileStagingCommitResult completeFileStaging(FileStagingCommitter& committer, const QList<app::FileStagingEntry>& entries) {
+  auto operation = committer.beginCommit(committer.prepare(FileStagingCommitter::scan(committer.prepareScan(entries))));
+  while (!operation.finished()) static_cast<void>(operation.advance());
+  return operation.result();
+}
+
+WmiMethodOutput fileExclusionResult(const std::initializer_list<std::string_view> paths = {}) {
+  WmiMethodOutput result;
+  auto& rows = result.arrays["ExcludedFiles"];
+  rows.reserve(paths.size());
+  for (const auto path : paths) rows.push_back({{"FileName", WmiValue::fromString(std::string(path))}});
+  return result;
+}
+
+FileStagingCommitOperation beginFileStagingWithTemporaryCommitter(WmiOperations& wmi, const QList<app::FileStagingEntry>& entries) {
+  FileStagingCommitter committer(wmi);
+  return committer.beginCommit(committer.prepare(FileStagingCommitter::scan(committer.prepareScan(entries))));
+}
+
 class ApplicationUiBehaviorTests final : public QObject {
   Q_OBJECT
 
@@ -194,6 +368,19 @@ class ApplicationUiBehaviorTests final : public QObject {
   void logBufferAndViewerPreserveMalformedAndStructuredLines();
   void marqueeAndUsageWidgetsHandleEmptyOverflowAndThresholdEdges();
   void diskTabsApplyCapabilityBoundariesAndPreserveInnerSelection();
+  void fileStagingTabPersistsImmediateEditsAndCollapsesCoveredPaths();
+  void fileStagingTabPreservesStateAcrossInvalidInputAndStorageFailures();
+  void fileStagingAndFileExclusionsRejectOverlapFromEitherEntryPoint();
+  void fileStagingCommitterTreatsPersistentAndAbsentTargetsAsIdempotent();
+  void fileStagingTaskSkipsUnavailableCapabilityWithoutWmi();
+  void fileStagingCommandUiCoalescesRequestsAndCompletesEveryTarget();
+  void enhancedModeServiceContractRejectsEveryBrokenInvariant();
+  void enhancedModeDialogReflectsDisabledEnabledAndRepairStates();
+  void enhancedModeRemovalPreflightsProtectedRegistryPersistence();
+  void mainWindowEnhancedModeActionTracksTheServiceLifecycle();
+  void mainWindowRetriesTransientEnhancedModeStatusFailures();
+  void mainWindowRoutesAuthenticatedServiceRequestsThroughSharedCoordinator();
+  void emptyAndMissingRegistryPlansSkipUwfInvocation();
   void diskCommitActionsRouteSelectedTargetsAndHonorCancellation();
   void importRoutingAndPendingCollectionCoverInvalidDuplicateAndMissingTargets();
   void applyPlanPreviewAndCopyUseTheSameProductionCommandMapping();
@@ -205,6 +392,7 @@ class ApplicationUiBehaviorTests final : public QObject {
   void safePowerActionsRequireConfirmationAndUseTheInjectedTransport();
   void commitBatchUsesAuthoritativeExistenceForEveryOutcome();
   void uiUtilitiesPreserveDriveComboAndDirtySemantics();
+  void mainWindowMountsFileStagingOnlyWherePerFileCommitIsSupported();
   void mainWindowQuietStartupInitializesWhileRemainingHidden();
   void mainWindowDistinguishesInitialFailureFromCommittedUnavailableState();
 
@@ -220,6 +408,7 @@ void ApplicationUiBehaviorTests::initTestCase() {
 }
 
 void ApplicationUiBehaviorTests::cleanupTestCase() {
+  FileStagingHandoff::instance().clear();
   ui::I18n::instance().setLang(m_originalLanguage);
   ui::ThemeManager::instance().apply(m_originalTheme);
   clearLogLines();
@@ -231,10 +420,12 @@ void ApplicationUiBehaviorTests::languageAndThemeChangesReachProductionWidgets()
   QCOMPARE(ui::I18n::instance().lang(), ui::I18n::Lang::Zh_CN);
   QVERIFY(!ui::I18n::applicationTitle().isEmpty());
   QVERIFY(ui::I18n::applicationTitle() != QStringLiteral("Unified Write Filter (UWF) Manager"));
+  QCOMPARE(ui::I18n::enhancedModeServiceDescription(), QStringLiteral("UWF Manager 增强模式辅助服务"));
   ui::AboutDialog localizedDialog;
   QVERIFY(buttonWithText(&localizedDialog, QStringLiteral("关闭")));
   QVERIFY(!buttonWithText(&localizedDialog, QStringLiteral("Close")));
   ui::I18n::instance().setLang(ui::I18n::Lang::En);
+  QCOMPARE(ui::I18n::enhancedModeServiceDescription(), QStringLiteral("UWF Manager enhanced mode helper service"));
 
   auto& theme = ui::ThemeManager::instance();
   QSignalSpy changed(&theme, &ui::ThemeManager::themeChanged);
@@ -416,12 +607,803 @@ void ApplicationUiBehaviorTests::diskTabsApplyCapabilityBoundariesAndPreserveInn
   auto* innerTabs = c.findChild<QTabWidget*>(QStringLiteral("innerTabs"));
   QVERIFY(innerTabs);
   QCOMPARE(innerTabs->count(), 2);
-  c.setActiveInfoTabIndex(1);
-  QCOMPARE(c.activeInfoTabIndex(), 1);
-  c.setActiveInfoTabIndex(99);
-  QCOMPARE(c.activeInfoTabIndex(), 1);
+  c.setActiveInfoPage(ui::DiskTab::InfoPage::RegistryExclusions);
+  QCOMPARE(c.activeInfoPage(), ui::DiskTab::InfoPage::RegistryExclusions);
+  c.setActiveInfoPage(ui::DiskTab::InfoPage::FileStaging);
+  QCOMPARE(c.activeInfoPage(), ui::DiskTab::InfoPage::RegistryExclusions);
+
+  MemoryFileDialogs dialogs;
+  MemoryFileStagingStore staging;
+  ui::DiskTab stagedSupported(supported, false, dialogs, staging);
+  ui::DiskTab stagedLimited(limited, false, dialogs, staging);
+  ui::DiskTab stagedUnsupported(unsupported, false, dialogs, staging);
+  QCOMPARE(stagedSupported.findChildren<ui::FileStagingWidget*>().size(), 1);
+  QCOMPARE(stagedLimited.findChildren<ui::FileStagingWidget*>().size(), 0);
+  QCOMPARE(stagedUnsupported.findChildren<ui::FileStagingWidget*>().size(), 0);
   QVERIFY(!ui::diskSupportText(core::DiskSupport::FileSystemLimited, "exFAT").empty());
   QVERIFY(!ui::diskSupportText(core::DiskSupport::ExceedsMaxSize, "NTFS").empty());
+}
+
+void ApplicationUiBehaviorTests::fileStagingTabPersistsImmediateEditsAndCollapsesCoveredPaths() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString filePath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("state.bin")));
+  QFile file(filePath);
+  QVERIFY(file.open(QIODevice::WriteOnly));
+  QVERIFY(file.write("state") > 0);
+  file.close();
+  const QString diskDrive = ui::extractDriveLetter(filePath);
+  QVERIFY(!diskDrive.isEmpty());
+  const QString otherDrive = diskDrive.compare(QStringLiteral("C:"), Qt::CaseInsensitive) == 0 ? QStringLiteral("D:") : QStringLiteral("C:");
+  const app::FileStagingEntry otherVolumeEntry{app::FileStagingKind::File, otherDrive + QStringLiteral("\\Other\\keep.bin")};
+
+  MemoryFileDialogs dialogs;
+  MemoryFileStagingStore store;
+  store.entries = {otherVolumeEntry};
+  const core::DiskInfo disk{diskDrive.toStdString(), "Volume{current}", "NTFS", "System", 1000, 500, core::DiskSupport::Supported};
+  ui::DiskTab tab(disk, true, dialogs, store);
+
+  auto* innerTabs = tab.findChild<QTabWidget*>(QStringLiteral("innerTabs"));
+  QVERIFY(innerTabs);
+  QCOMPARE(innerTabs->count(), 3);
+  QCOMPARE(innerTabs->tabText(0), QStringLiteral("File exclusions"));
+  QCOMPARE(innerTabs->tabText(1), QStringLiteral("Registry exclusions"));
+  QCOMPARE(innerTabs->tabText(2), QStringLiteral("File staging"));
+
+  auto* staging = qobject_cast<ui::FileStagingWidget*>(innerTabs->widget(2));
+  QVERIFY(staging);
+  QCOMPARE(staging->driveLetter(), diskDrive);
+  auto* addFiles = staging->findChild<QAction*>(QStringLiteral("stageFilesAction"));
+  auto* addDirectory = staging->findChild<QAction*>(QStringLiteral("stageDirectoryAction"));
+  auto* list = staging->findChild<QListWidget*>(QStringLiteral("exclusionList"));
+  auto* filter = staging->findChild<QLineEdit*>(QStringLiteral("filterInput"));
+  QVERIFY(addFiles && addDirectory && list && filter);
+  QCOMPARE(list->count(), 0);
+
+  dialogs.openedFile = filePath;
+  addFiles->trigger();
+  QCOMPARE(store.writes, 1);
+  QCOMPARE(store.entries.size(), 2);
+  const app::FileStagingEntry currentVolumeFile{app::FileStagingKind::File, filePath};
+  QVERIFY(store.entries.contains(otherVolumeEntry));
+  QVERIFY(store.entries.contains(currentVolumeFile));
+  QCOMPARE(list->count(), 1);
+
+  // Windows 路径大小写不敏感；同一文件的不同盘符大小写不能产生第二条记录。
+  QString alternateCase = filePath;
+  alternateCase[0] = alternateCase[0].toLower();
+  dialogs.openedFile = alternateCase;
+  addFiles->trigger();
+  QCOMPARE(store.writes, 1);
+
+  filter->setText(QStringLiteral("not-present"));
+  QVERIFY(list->item(0)->isHidden());
+  filter->setText(QFileInfo(filePath).fileName());
+  QVERIFY(!list->item(0)->isHidden());
+  filter->clear();
+
+  dialogs.selectedDirectory = QDir::toNativeSeparators(directory.path());
+  addDirectory->trigger();
+  QCOMPARE(store.writes, 2);
+  QCOMPARE(store.entries.size(), 2);
+  const app::FileStagingEntry currentVolumeDirectory{app::FileStagingKind::Directory, dialogs.selectedDirectory};
+  QVERIFY(store.entries.contains(otherVolumeEntry));
+  QVERIFY(store.entries.contains(currentVolumeDirectory));
+
+  dialogs.openedFile = filePath;
+  addFiles->trigger();
+  QCOMPARE(store.writes, 2);
+  QCOMPARE(list->count(), 1);
+  list->item(0)->setSelected(true);
+  auto* remove = buttonWithText(staging, QStringLiteral("Remove selected"));
+  QVERIFY(remove);
+  QTest::mouseClick(remove, Qt::LeftButton);
+  QCOMPARE(store.writes, 3);
+  QCOMPARE(store.entries, QList<app::FileStagingEntry>{otherVolumeEntry});
+}
+
+void ApplicationUiBehaviorTests::fileStagingTabPreservesStateAcrossInvalidInputAndStorageFailures() {
+  QTemporaryFile file;
+  QVERIFY(file.open());
+  const QString filePath = QDir::toNativeSeparators(file.fileName());
+  const QString drive = ui::extractDriveLetter(filePath);
+  QVERIFY(!drive.isEmpty());
+
+  MemoryFileDialogs dialogs;
+  MemoryFileStagingStore store;
+  store.entries = {{app::FileStagingKind::File, filePath}};
+  ui::FileStagingWidget staging(drive, store, dialogs);
+  auto* list = staging.findChild<QListWidget*>(QStringLiteral("exclusionList"));
+  auto* remove = buttonWithText(&staging, QStringLiteral("Remove selected"));
+  auto* addDirectory = staging.findChild<QAction*>(QStringLiteral("stageDirectoryAction"));
+  QVERIFY(list && remove && addDirectory);
+  QCOMPARE(list->count(), 1);
+
+  // 只读与存储故障是两种状态：未提权时仍能筛选、选择和复制现有条目，
+  // 但任何程序化或真实按钮触发都不能进入持久化边界。
+  auto* addFiles = staging.findChild<QAction*>(QStringLiteral("stageFilesAction"));
+  auto* filter = staging.findChild<QLineEdit*>(QStringLiteral("filterInput"));
+  QVERIFY(addFiles && filter);
+  staging.setReadOnly(true);
+  QVERIFY(!addFiles->isEnabled());
+  QVERIFY(!addDirectory->isEnabled());
+  QVERIFY(!remove->isEnabled());
+  QVERIFY(list->isEnabled());
+  QVERIFY(filter->isEnabled());
+  dialogs.openedFile = filePath;
+  addFiles->trigger();
+  QCOMPARE(store.writes, 0);
+  staging.setReadOnly(false);
+  QVERIFY(addFiles->isEnabled());
+  QVERIFY(addDirectory->isEnabled());
+  QVERIFY(remove->isEnabled());
+
+  dialogs.selectedDirectory = filePath;
+  QTimer::singleShot(0, [] {
+    if (auto* warning = qobject_cast<QDialog*>(QApplication::activeModalWidget())) warning->reject();
+  });
+  addDirectory->trigger();
+  QCOMPARE(store.writes, 0);
+  QCOMPARE(list->count(), 1);
+
+  dialogs.openedFile = QStringLiteral("C:relative-state.bin");
+  QTimer::singleShot(0, [] {
+    if (auto* warning = qobject_cast<QDialog*>(QApplication::activeModalWidget())) warning->reject();
+  });
+  addFiles->trigger();
+  QCOMPARE(store.writes, 0);
+  QCOMPARE(list->count(), 1);
+
+  const QString otherDrive = drive.compare(QStringLiteral("C:"), Qt::CaseInsensitive) == 0 ? QStringLiteral("D:") : QStringLiteral("C:");
+  MemoryFileStagingStore crossDriveStore;
+  ui::FileStagingWidget crossDrive(otherDrive, crossDriveStore, dialogs);
+  auto* crossDriveAction = crossDrive.findChild<QAction*>(QStringLiteral("stageFilesAction"));
+  auto* crossDriveList = crossDrive.findChild<QListWidget*>(QStringLiteral("exclusionList"));
+  QVERIFY(crossDriveAction && crossDriveList);
+  dialogs.openedFile = filePath;
+  QTimer::singleShot(0, [] {
+    if (auto* warning = qobject_cast<QDialog*>(QApplication::activeModalWidget())) warning->reject();
+  });
+  crossDriveAction->trigger();
+  QCOMPARE(crossDriveStore.writes, 0);
+  QVERIFY(crossDriveStore.entries.isEmpty());
+  QCOMPARE(crossDriveList->count(), 0);
+  QCOMPARE(dialogs.requests.back().initialPath, ui::dialogs::dialogBasePath(otherDrive));
+
+  store.writeFailure = QStringLiteral("registry write failed");
+  list->item(0)->setSelected(true);
+  QTimer::singleShot(0, [] {
+    if (auto* warning = qobject_cast<QDialog*>(QApplication::activeModalWidget())) warning->reject();
+  });
+  QTest::mouseClick(remove, Qt::LeftButton);
+  QCOMPARE(store.writes, 0);
+  QCOMPARE(store.entries.size(), 1);
+  QCOMPARE(list->count(), 1);
+
+  MemoryFileStagingStore unavailableStore;
+  unavailableStore.readFailure = QStringLiteral("registry read failed");
+  ui::FileStagingWidget unavailable(drive, unavailableStore, dialogs);
+  auto* unavailableList = unavailable.findChild<QListWidget*>(QStringLiteral("exclusionList"));
+  auto* unavailableFilter = unavailable.findChild<QLineEdit*>(QStringLiteral("filterInput"));
+  QVERIFY(unavailableList && unavailableFilter);
+  QVERIFY(!unavailableList->isEnabled());
+  QVERIFY(!unavailableFilter->isEnabled());
+}
+
+void ApplicationUiBehaviorTests::fileStagingAndFileExclusionsRejectOverlapFromEitherEntryPoint() {
+  QTemporaryFile file;
+  QVERIFY(file.open());
+  const QString filePath = QDir::toNativeSeparators(file.fileName());
+  const QString drive = ui::extractDriveLetter(filePath);
+  QVERIFY(!drive.isEmpty());
+
+  app::FileStagingConflictPolicy conflicts;
+  MemoryFileDialogs dialogs;
+  ui::ExclusionListWidget exclusions(ui::ExclusionListWidget::Kind::File, dialogs, conflicts);
+  exclusions.setDriveLetter(drive);
+  exclusions.setBaseline({filePath}, {filePath});
+
+  MemoryFileStagingStore emptyStore;
+  ui::FileStagingWidget staging(drive, emptyStore, dialogs, conflicts);
+  dialogs.openedFile = filePath;
+  QTimer::singleShot(0, [] {
+    if (auto* warning = qobject_cast<QDialog*>(QApplication::activeModalWidget())) warning->reject();
+  });
+  auto* addFiles = staging.findChild<QAction*>(QStringLiteral("stageFilesAction"));
+  QVERIFY(addFiles);
+  addFiles->trigger();
+  QCOMPARE(emptyStore.writes, 0);
+  QVERIFY(emptyStore.entries.isEmpty());
+
+  MemoryFileStagingStore stagedStore;
+  stagedStore.entries = {{app::FileStagingKind::File, filePath}};
+  ui::FileStagingWidget staged(drive, stagedStore, dialogs, conflicts);
+  QVERIFY(staged.findChild<QListWidget*>(QStringLiteral("exclusionList")));
+  exclusions.setBaseline({}, {});
+  QCOMPARE(exclusions.importAdd(filePath), ui::ExclusionListWidget::ImportOutcome::RejectedConflict);
+  QVERIFY(exclusions.pendingAdded().isEmpty());
+}
+
+void ApplicationUiBehaviorTests::fileStagingCommitterTreatsPersistentAndAbsentTargetsAsIdempotent() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString existingPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("state.bin")));
+  QFile file(existingPath);
+  QVERIFY(file.open(QIODevice::WriteOnly));
+  QVERIFY(file.write("state") > 0);
+  file.close();
+  const QString drive = ui::extractDriveLetter(existingPath);
+  QVERIFY(!drive.isEmpty());
+
+  std::stop_source canceledScan;
+  canceledScan.request_stop();
+  RecordingWmiOperations canceledWmi;
+  canceledWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                       {"CurrentSession", WmiValue::fromBool(true)},
+                                       {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                       {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                       {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                       {"CommitPending", WmiValue::fromBool(false)},
+                                       {"Protected", WmiValue::fromBool(true)}}});
+  canceledWmi.readResults.push_back(fileExclusionResult());
+  FileStagingCommitter canceledCommitter(canceledWmi);
+  auto canceledOperation = canceledCommitter.beginCommit(canceledCommitter.prepare(
+      FileStagingCommitter::scan(canceledCommitter.prepareScan({{app::FileStagingKind::File, existingPath}}), canceledScan.get_token())));
+  QVERIFY(canceledOperation.finished());
+  QCOMPARE(canceledOperation.result().discoveredFiles, 0);
+  QVERIFY(canceledWmi.queryResults.empty());
+  QVERIFY(canceledWmi.invocations.empty());
+
+  RecordingWmiOperations absentWmi;
+  absentWmi.queryResults.push_back({});
+  FileStagingCommitter absentCommitter(absentWmi);
+  const auto absentResult =
+      completeFileStaging(absentCommitter, {{app::FileStagingKind::File, QDir::toNativeSeparators(directory.filePath(QStringLiteral("missing.bin")))}});
+  QCOMPARE(absentResult.skippedEntries, 1);
+  QCOMPARE(absentResult.discoveredFiles, 0);
+  QVERIFY(absentResult.succeeded());
+  QVERIFY(absentWmi.queryResults.empty());
+  QVERIFY(absentWmi.invocations.empty());
+
+  RecordingWmiOperations unprotectedWmi;
+  unprotectedWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                          {"CurrentSession", WmiValue::fromBool(true)},
+                                          {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                          {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                          {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                          {"CommitPending", WmiValue::fromBool(false)},
+                                          {"Protected", WmiValue::fromBool(false)}}});
+  FileStagingCommitter unprotectedCommitter(unprotectedWmi);
+  const auto unprotectedResult = completeFileStaging(unprotectedCommitter, {{app::FileStagingKind::File, existingPath}});
+  QCOMPARE(unprotectedResult.discoveredFiles, 0);
+  QCOMPARE(unprotectedResult.skippedEntries, 1);
+  QVERIFY(unprotectedResult.succeeded());
+  QVERIFY(unprotectedWmi.invocations.empty());
+
+  RecordingWmiOperations excludedWmi;
+  excludedWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                       {"CurrentSession", WmiValue::fromBool(true)},
+                                       {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                       {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                       {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                       {"CommitPending", WmiValue::fromBool(false)},
+                                       {"Protected", WmiValue::fromBool(true)}}});
+  excludedWmi.readResults.push_back(fileExclusionResult({existingPath.toStdString()}));
+  FileStagingCommitter excludedCommitter(excludedWmi);
+  const auto excludedResult = completeFileStaging(excludedCommitter, {{app::FileStagingKind::File, existingPath}});
+  QCOMPARE(excludedResult.skippedEntries, std::size_t{1});
+  QCOMPARE(excludedResult.discoveredFiles, std::size_t{0});
+  QVERIFY(excludedResult.succeeded());
+  QVERIFY(excludedWmi.invocations.empty());
+
+  RecordingWmiOperations nestedExclusionWmi;
+  nestedExclusionWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                              {"CurrentSession", WmiValue::fromBool(true)},
+                                              {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                              {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                              {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                              {"CommitPending", WmiValue::fromBool(false)},
+                                              {"Protected", WmiValue::fromBool(true)}}});
+  nestedExclusionWmi.readResults.push_back(fileExclusionResult({existingPath.toStdString()}));
+  FileStagingCommitter nestedExclusionCommitter(nestedExclusionWmi);
+  const auto nestedExclusionResult =
+      completeFileStaging(nestedExclusionCommitter,
+                          {{app::FileStagingKind::Directory, QDir::toNativeSeparators(directory.path())}});
+  QCOMPARE(nestedExclusionResult.skippedFiles, std::size_t{1});
+  QCOMPARE(nestedExclusionResult.discoveredFiles, std::size_t{0});
+  QVERIFY(nestedExclusionResult.succeeded());
+  QVERIFY(nestedExclusionWmi.invocations.empty());
+
+  RecordingWmiOperations exclusionReadFailureWmi;
+  exclusionReadFailureWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                                   {"CurrentSession", WmiValue::fromBool(true)},
+                                                   {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                                   {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                                   {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                                   {"CommitPending", WmiValue::fromBool(false)},
+                                                   {"Protected", WmiValue::fromBool(true)}}});
+  FileStagingCommitter exclusionReadFailureCommitter(exclusionReadFailureWmi);
+  const auto exclusionReadFailureResult =
+      completeFileStaging(exclusionReadFailureCommitter, {{app::FileStagingKind::File, existingPath}});
+  QCOMPARE(exclusionReadFailureResult.failures.size(), 1);
+  QCOMPARE(exclusionReadFailureResult.failures.front().kind, FileStagingCommitFailureKind::ProviderFailure);
+  QVERIFY(exclusionReadFailureWmi.invocations.empty());
+
+  RecordingWmiOperations unchangedWmi;
+  unchangedWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                        {"CurrentSession", WmiValue::fromBool(true)},
+                                        {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                        {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                        {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                        {"CommitPending", WmiValue::fromBool(false)},
+                                        {"Protected", WmiValue::fromBool(true)}}});
+  unchangedWmi.readResults.push_back(fileExclusionResult());
+  unchangedWmi.invocationFailure =
+      std::make_exception_ptr(WmiProviderError(static_cast<uint32_t>(static_cast<int32_t>(WmiErrorCode::NotFound)), "commit staged file"));
+  FileStagingCommitter unchangedCommitter(unchangedWmi);
+  const auto unchangedResult = completeFileStaging(unchangedCommitter, {{app::FileStagingKind::File, existingPath}});
+  QCOMPARE(unchangedResult.discoveredFiles, 1);
+  QCOMPARE(unchangedResult.skippedFiles, 1);
+  QCOMPARE(unchangedWmi.invocations, std::vector<QString>{QStringLiteral("CommitFile")});
+  QVERIFY(unchangedResult.succeeded());
+
+  RecordingWmiOperations detachedOperationWmi;
+  detachedOperationWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                                {"CurrentSession", WmiValue::fromBool(true)},
+                                                {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                                {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                                {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                                {"CommitPending", WmiValue::fromBool(false)},
+                                                {"Protected", WmiValue::fromBool(true)}}});
+  detachedOperationWmi.readResults.push_back(fileExclusionResult());
+  auto detachedOperation = beginFileStagingWithTemporaryCommitter(detachedOperationWmi, {{app::FileStagingKind::File, existingPath}});
+  QCOMPARE(detachedOperation.totalFiles(), std::size_t{1});
+  QCOMPARE(detachedOperation.advance(), existingPath);
+  QVERIFY(detachedOperation.finished());
+  QCOMPARE(detachedOperationWmi.invocations, std::vector<QString>{QStringLiteral("CommitFile")});
+
+  RecordingWmiOperations relativeWmi;
+  relativeWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                       {"CurrentSession", WmiValue::fromBool(true)},
+                                       {"DriveLetter", WmiValue::fromString("C:")},
+                                       {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                       {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                       {"CommitPending", WmiValue::fromBool(false)},
+                                       {"Protected", WmiValue::fromBool(true)}}});
+  FileStagingCommitter relativeCommitter(relativeWmi);
+  const auto relativeResult = completeFileStaging(relativeCommitter, {{app::FileStagingKind::File, QStringLiteral("C:relative-state.bin")}});
+  QCOMPARE(relativeResult.discoveredFiles, std::size_t{0});
+  QCOMPARE(relativeResult.failures.size(), 1);
+  QCOMPARE(relativeResult.failures.front().kind, FileStagingCommitFailureKind::InvalidPath);
+  QVERIFY(relativeWmi.invocations.empty());
+}
+
+void ApplicationUiBehaviorTests::fileStagingTaskSkipsUnavailableCapabilityWithoutWmi() {
+  RecordingWmiOperations wmi;
+  MemoryFileStagingStore staging;
+  staging.entries = {{app::FileStagingKind::File, QStringLiteral("C:\\State\\one.bin")}, {app::FileStagingKind::Directory, QStringLiteral("D:\\State")}};
+
+  FileStagingTask task(wmi, staging, UwfCapability::Unavailable);
+  QVERIFY(task.pollPreparation());
+  QVERIFY(task.preparationFinished());
+  QVERIFY(task.finished());
+  QCOMPARE(task.totalFiles(), std::size_t{0});
+  QCOMPARE(task.result().skippedEntries, std::size_t{2});
+  QVERIFY(task.result().succeeded());
+  QVERIFY(wmi.queryResults.empty());
+  QVERIFY(wmi.invocations.empty());
+}
+
+void ApplicationUiBehaviorTests::fileStagingCommandUiCoalescesRequestsAndCompletesEveryTarget() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  QStringList paths;
+  for (const QString& name : {QStringLiteral("first.bin"), QStringLiteral("second.bin")}) {
+    const QString path = QDir::toNativeSeparators(directory.filePath(name));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QVERIFY(file.write(name.toUtf8()) > 0);
+    paths.append(path);
+  }
+  const QString drive = ui::extractDriveLetter(paths.front());
+  QVERIFY(!drive.isEmpty());
+
+  RecordingWmiOperations wmi;
+  wmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  wmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                               {"CurrentSession", WmiValue::fromBool(true)},
+                               {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                               {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                               {"BindByDriveLetter", WmiValue::fromBool(true)},
+                               {"CommitPending", WmiValue::fromBool(false)},
+                               {"Protected", WmiValue::fromBool(true)}}});
+  wmi.readResults.push_back(fileExclusionResult());
+  MemoryFileStagingStore store;
+  for (const QString& path : paths) store.entries.append({app::FileStagingKind::File, path});
+
+  QWidget parent;
+  parent.show();
+  ui::FileStagingCoordinator coordinator(wmi, store, UwfCapability::Available, &parent);
+  QSignalSpy progress(&coordinator, &ui::FileStagingCoordinator::progressChanged);
+  connect(&coordinator, &ui::FileStagingCoordinator::progressChanged, &coordinator,
+          [](std::size_t, std::size_t) { throw std::runtime_error("progress observer failure"); });
+  int completions = 0;
+  app::ApplicationCommandResult firstResult;
+  app::ApplicationCommandResult secondResult;
+  QElapsedTimer visibleDuration;
+  visibleDuration.start();
+  app::ApplicationCommandResult obsoleteResult;
+  obsoleteResult.discoveredFiles = 99;
+  obsoleteResult.committedFiles = 99;
+  FileStagingHandoff::instance().publish(obsoleteResult, store.entries);
+  coordinator.requestCommit(ui::FileStagingRequestOrigin::UserCommand, [&](const ui::FileStagingBatchResult& result) {
+    firstResult = result.command;
+    ++completions;
+  });
+  coordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown, [&](const ui::FileStagingBatchResult& result) {
+    secondResult = result.command;
+    ++completions;
+  });
+  bool externalOwnershipTransferred = false;
+  bool requestQueuedDuringExternalOwnership = false;
+  std::optional<app::ApplicationCommandResult> queuedResult;
+  auto immediateBatch = coordinator.reserveExternalBatch([&](const ui::FileStagingBatchResult& result, ui::FileStagingCoordinator::ExternalBatch batch) {
+    externalOwnershipTransferred = coordinator.active();
+    QCOMPARE(result.sourceEntries, std::optional<QList<app::FileStagingEntry>>{store.entries});
+    coordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown, [&](const ui::FileStagingBatchResult& queued) {
+      requestQueuedDuringExternalOwnership = true;
+      queuedResult = queued.command;
+    });
+    QVERIFY(!requestQueuedDuringExternalOwnership);
+    batch.complete(result);
+  });
+  QVERIFY(!immediateBatch.has_value());
+
+  auto* dialog = parent.findChild<QDialog*>(QStringLiteral("fileStagingProgressDialog"));
+  QTRY_VERIFY_WITH_TIMEOUT(dialog && dialog->isVisible(), 1000);
+  QVERIFY(dialog->windowFlags().testFlag(Qt::FramelessWindowHint));
+  QVERIFY(dialog->findChildren<QPushButton*>().isEmpty());
+  QVERIFY(dialog->findChild<QProgressBar*>(QStringLiteral("fileStagingCommandProgress")));
+  QTRY_COMPARE_WITH_TIMEOUT(completions, 2, 5000);
+  QVERIFY(visibleDuration.elapsed() >= 1900);
+  QCOMPARE(firstResult.outcome, app::ApplicationCommandOutcome::Succeeded);
+  QCOMPARE(firstResult.committedFiles, std::size_t{2});
+  QCOMPARE(secondResult.committedFiles, firstResult.committedFiles);
+  QVERIFY(externalOwnershipTransferred);
+  QVERIFY(requestQueuedDuringExternalOwnership);
+  QVERIFY(queuedResult.has_value());
+  QCOMPARE(queuedResult->committedFiles, firstResult.committedFiles);
+  QCOMPARE(wmi.invocations, std::vector<QString>({QStringLiteral("CommitFile"), QStringLiteral("CommitFile")}));
+  QVERIFY(!progress.isEmpty());
+
+  app::ApplicationCommandResult handedOff;
+  handedOff.discoveredFiles = 2;
+  handedOff.committedFiles = 2;
+  FileStagingHandoff::instance().publish(handedOff, store.entries);
+  bool handoffCompleted = false;
+  coordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown, [&](const ui::FileStagingBatchResult& result) {
+    handoffCompleted = true;
+    QCOMPARE(result.command.committedFiles, std::size_t{2});
+  });
+  QVERIFY(handoffCompleted);
+  QVERIFY(!coordinator.active());
+  QCOMPARE(wmi.invocations.size(), std::size_t{2});
+
+  FileStagingHandoff::instance().publish(handedOff, store.entries);
+  auto changedEntries = store.entries;
+  changedEntries.append({app::FileStagingKind::File, QStringLiteral("C:\\changed-after-canceled-shutdown.bin")});
+  store.entries = changedEntries;
+  QVERIFY(!FileStagingHandoff::instance().consume(store).has_value());
+
+  app::ApplicationCommandResult approvedResult{app::ApplicationCommandOutcome::ContinuationApproved, 2, 1, 0, 0, 1,
+                                               QStringLiteral("explicitly approved staging failure")};
+  store.entries.clear();
+  for (const QString& path : paths) store.entries.append({app::FileStagingKind::File, path});
+  FileStagingHandoff::instance().publish(approvedResult, store.entries);
+  store.entries.append({app::FileStagingKind::File, QStringLiteral("C:\\changed-after-explicit-approval.bin")});
+  QVERIFY(!FileStagingHandoff::instance().consume(store).has_value());
+
+  auto exclusiveBatch = coordinator.reserveExternalBatch([](const ui::FileStagingBatchResult&, ui::FileStagingCoordinator::ExternalBatch) {});
+  QVERIFY(exclusiveBatch.has_value());
+  QVERIFY_THROWS_EXCEPTION(
+      std::logic_error,
+      static_cast<void>(coordinator.reserveExternalBatch([](const ui::FileStagingBatchResult&, ui::FileStagingCoordinator::ExternalBatch) {})));
+  bool completionAfterThrowWasDelivered = false;
+  coordinator.requestCommit(ui::FileStagingRequestOrigin::UserCommand, [](const ui::FileStagingBatchResult&) { throw std::runtime_error("observer failure"); });
+  coordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown,
+                            [&](const ui::FileStagingBatchResult&) { completionAfterThrowWasDelivered = true; });
+  exclusiveBatch->complete({handedOff, store.entries});
+  QVERIFY(completionAfterThrowWasDelivered);
+  QVERIFY(!coordinator.active());
+}
+
+void ApplicationUiBehaviorTests::enhancedModeDialogReflectsDisabledEnabledAndRepairStates() {
+  RecordingWmiOperations wmi;
+  MemoryEnhancedModeServiceControl serviceControl;
+  service::EnhancedModeManager manager(serviceControl, wmi, UwfCapability::Unavailable);
+  ui::EnhancedModeDialog dialog(manager);
+  dialog.show();
+  QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+  auto* status = dialog.findChild<QLabel*>(QStringLiteral("enhancedModeStatus"));
+  auto* change = dialog.findChild<QPushButton*>(QStringLiteral("enhancedModeChangeButton"));
+  auto* remove = dialog.findChild<QPushButton*>(QStringLiteral("enhancedModeRemoveButton"));
+  QVERIFY(status && change && remove);
+  QCOMPARE(status->text(), QStringLiteral("Status: Disabled"));
+  QCOMPARE(change->text(), QStringLiteral("Enable enhanced mode"));
+  QVERIFY(!remove->isEnabled());
+  QTest::mouseClick(change, Qt::LeftButton);
+  QCOMPARE(serviceControl.installs, 1);
+  QCOMPARE(serviceControl.installedDescription, QStringLiteral("UWF Manager enhanced mode helper service"));
+  QCOMPARE(status->text(), QStringLiteral("Status: Enabled"));
+  QCOMPARE(change->text(), QStringLiteral("Disable enhanced mode"));
+  QVERIFY(remove->isEnabled());
+
+  manager.setAgentState(service::EnhancedModeAgentState::Connecting);
+  auto* issue = dialog.findChild<QLabel*>(QStringLiteral("enhancedModeIssue"));
+  QVERIFY(issue);
+  QCOMPARE(issue->text(), QStringLiteral("Waiting for the UI agent to complete authentication."));
+
+  manager.setAgentState(service::EnhancedModeAgentState::Disconnected);
+  QCOMPARE(status->text(), QStringLiteral("Status: Enabled"));
+  QCOMPARE(change->text(), QStringLiteral("Disable enhanced mode"));
+  QCOMPARE(issue->text(), QStringLiteral("The service is running, but no authenticated UI agent is connected."));
+
+  manager.setAgentState(service::EnhancedModeAgentState::Connected);
+  QVERIFY(!issue->isVisible());
+
+  QTest::mouseClick(change, Qt::LeftButton);
+  QCOMPARE(serviceControl.removals, 1);
+  QCOMPARE(status->text(), QStringLiteral("Status: Disabled"));
+  QCOMPARE(serviceControl.activeDeletionBarriers, 0);
+  QVERIFY(!serviceControl.queriedDuringDeletion);
+  QVERIFY(!remove->isEnabled());
+
+  serviceControl.current = {};
+  serviceControl.current.state = service::EnhancedModeState::Stopped;
+  serviceControl.current.serviceExists = true;
+  serviceControl.current.ownProcess = true;
+  serviceControl.current.automaticStart = true;
+  serviceControl.current.localSystemAccount = true;
+  serviceControl.current.executableMatches = true;
+  serviceControl.current.preshutdownTimeoutConfigured = true;
+  serviceControl.current.requiredPrivilegesConfigured = true;
+  serviceControl.current.serviceRegistryPresent = true;
+  ui::EnhancedModeDialog stopped(manager);
+  auto* start = stopped.findChild<QPushButton*>(QStringLiteral("enhancedModeChangeButton"));
+  auto* stoppedStatus = stopped.findChild<QLabel*>(QStringLiteral("enhancedModeStatus"));
+  auto* stoppedIssue = stopped.findChild<QLabel*>(QStringLiteral("enhancedModeIssue"));
+  QVERIFY(start && stoppedStatus && stoppedIssue);
+  QCOMPARE(stoppedStatus->text(), QStringLiteral("Status: Service stopped"));
+  QCOMPARE(start->text(), QStringLiteral("Start service"));
+  QCOMPARE(stoppedIssue->text(), QStringLiteral("The service is not running."));
+  QTest::mouseClick(start, Qt::LeftButton);
+  QCOMPARE(serviceControl.starts, 1);
+  QCOMPARE(serviceControl.installs, 1);
+  QCOMPARE(stoppedStatus->text(), QStringLiteral("Status: Enabled"));
+
+  serviceControl.current.running = true;
+  serviceControl.current.state = service::EnhancedModeState::RepairRequired;
+  serviceControl.current.executableMatches = false;
+  ui::EnhancedModeDialog repairRequired(manager);
+  auto* repair = repairRequired.findChild<QPushButton*>(QStringLiteral("enhancedModeChangeButton"));
+  auto* repairStatus = repairRequired.findChild<QLabel*>(QStringLiteral("enhancedModeStatus"));
+  auto* repairIssue = repairRequired.findChild<QLabel*>(QStringLiteral("enhancedModeIssue"));
+  QVERIFY(repair && repairStatus && repairIssue);
+  QCOMPARE(repairStatus->text(), QStringLiteral("Status: Repair required"));
+  QCOMPARE(repair->text(), QStringLiteral("Repair enhanced mode"));
+  QVERIFY(repairIssue->text().contains(QStringLiteral("executable path or startup arguments")));
+
+  serviceControl.current = {};
+  serviceControl.current.state = service::EnhancedModeState::RepairRequired;
+  serviceControl.current.serviceRegistryPresent = true;
+  ui::EnhancedModeDialog residual(manager);
+  auto* residualRemove = residual.findChild<QPushButton*>(QStringLiteral("enhancedModeRemoveButton"));
+  auto* residualIssue = residual.findChild<QLabel*>(QStringLiteral("enhancedModeIssue"));
+  QVERIFY(residualRemove && residualIssue);
+  QVERIFY(residualRemove->isEnabled());
+  QCOMPARE(residualIssue->text(), QStringLiteral("The service is absent, but its service registry data remains."));
+
+  serviceControl.queryFailure = QStringLiteral("SCM unavailable");
+  ui::EnhancedModeDialog unavailable(manager);
+  auto* unavailableStatus = unavailable.findChild<QLabel*>(QStringLiteral("enhancedModeStatus"));
+  auto* unavailableChange = unavailable.findChild<QPushButton*>(QStringLiteral("enhancedModeChangeButton"));
+  auto* unavailableRemove = unavailable.findChild<QPushButton*>(QStringLiteral("enhancedModeRemoveButton"));
+  auto* unavailableIssue = unavailable.findChild<QLabel*>(QStringLiteral("enhancedModeIssue"));
+  QVERIFY(unavailableStatus && unavailableChange && unavailableRemove && unavailableIssue);
+  QCOMPARE(unavailableStatus->text(), QStringLiteral("Enhanced mode status could not be read"));
+  QCOMPARE(unavailableIssue->text(), serviceControl.queryFailure);
+  QVERIFY(!unavailableChange->isEnabled());
+  QVERIFY(!unavailableRemove->isEnabled());
+}
+
+void ApplicationUiBehaviorTests::enhancedModeServiceContractRejectsEveryBrokenInvariant() {
+  const auto complete = completeEnhancedModeStatus();
+  QVERIFY(complete.serviceContractSatisfied());
+
+  constexpr std::array requirements{
+      &service::EnhancedModeStatus::serviceExists,
+      &service::EnhancedModeStatus::ownProcess,
+      &service::EnhancedModeStatus::automaticStart,
+      &service::EnhancedModeStatus::localSystemAccount,
+      &service::EnhancedModeStatus::running,
+      &service::EnhancedModeStatus::executableMatches,
+      &service::EnhancedModeStatus::preshutdownTimeoutConfigured,
+      &service::EnhancedModeStatus::requiredPrivilegesConfigured,
+      &service::EnhancedModeStatus::preshutdownAccepted,
+  };
+  for (const auto requirement : requirements) {
+    auto broken = complete;
+    broken.*requirement = false;
+    QVERIFY(!broken.serviceContractSatisfied());
+  }
+}
+
+void ApplicationUiBehaviorTests::enhancedModeRemovalPreflightsProtectedRegistryPersistence() {
+  RecordingWmiOperations unavailableWmi;
+  MemoryEnhancedModeServiceControl protectedService;
+  protectedService.current = completeEnhancedModeStatus();
+  service::EnhancedModeManager unavailableManager(protectedService, unavailableWmi, UwfCapability::Available);
+
+  QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(unavailableManager.disable()));
+  QCOMPARE(protectedService.removals, 0);
+  QCOMPARE(protectedService.current.state, service::EnhancedModeState::Enabled);
+
+  RecordingWmiOperations availableWmi;
+  availableWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  availableWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("registry-path")},
+                                        {"CurrentSession", WmiValue::fromBool(true)},
+                                        {"PersistDomainSecretKey", WmiValue::fromBool(false)},
+                                        {"PersistTSCAL", WmiValue::fromBool(false)}}});
+  MemoryEnhancedModeServiceControl removableService;
+  removableService.current = protectedService.current;
+  // 使用必然存在、但只经内存 WMI 传输处理的 hive 根验证时序；测试不会修改
+  // 真实注册表。计划在 SCM 变更前冻结，方法调用发生时删除屏障必须仍存活。
+  removableService.deletionPlan = {{"HKEY_CURRENT_USER", {}}};
+  bool deletionCommittedInsideBarrier = false;
+  availableWmi.invocationObserver = [&] { deletionCommittedInsideBarrier = removableService.activeDeletionBarriers == 1; };
+  service::EnhancedModeManager availableManager(removableService, availableWmi, UwfCapability::Available);
+  const auto result = availableManager.disable();
+  QCOMPARE(removableService.removals, 1);
+  QCOMPARE(removableService.activeDeletionBarriers, 0);
+  QVERIFY(deletionCommittedInsideBarrier);
+  QCOMPARE(availableWmi.invocations, std::vector<QString>{QStringLiteral("CommitRegistryDeletion")});
+  QCOMPARE(result.status.state, service::EnhancedModeState::Disabled);
+  QVERIFY(result.persistenceWarning.isEmpty());
+}
+
+void ApplicationUiBehaviorTests::mainWindowEnhancedModeActionTracksTheServiceLifecycle() {
+  RecordingWmiOperations wmi;
+  MemoryFileStagingStore staging;
+  MemoryEnhancedModeServiceControl serviceControl;
+  MemoryEnhancedModeAgent agent;
+  MutableApplicationStateSource source;
+  source.disks = {{"C:", "Volume{c}", "NTFS", "System", 1000, 500, core::DiskSupport::Supported}};
+  source.snapshot.uwfAvailable = false;
+  source.snapshot.elevated = true;
+
+  ui::MainWindow window({wmi, source, staging, &serviceControl, &agent},
+                        {.uwfCapability = UwfCapability::Unavailable, .compatibilityMode = false, .osProductName = {}, .osEditionId = {}});
+  window.show();
+  QTRY_COMPARE_WITH_TIMEOUT(source.reads, 1, 1000);
+  auto* enhancedAction = actionWithText(&window, QStringLiteral("Enhanced mode"));
+  QVERIFY(enhancedAction);
+  QVERIFY(!enhancedAction->icon().isNull());
+  QCOMPARE(enhancedAction->toolTip(), QStringLiteral("Coordinate automatic file staging with Windows shutdown and restart."));
+  const qint64 disabledIcon = enhancedAction->icon().cacheKey();
+
+  bool enableDialogObserved = false;
+  QTimer::singleShot(0, &window, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog || dialog->objectName() != QStringLiteral("enhancedModeDialog")) return;
+    auto* status = dialog->findChild<QLabel*>(QStringLiteral("enhancedModeStatus"));
+    auto* change = dialog->findChild<QPushButton*>(QStringLiteral("enhancedModeChangeButton"));
+    if (!status || !change || status->text() != QStringLiteral("Status: Disabled")) return;
+    enableDialogObserved = true;
+    change->click();
+    dialog->reject();
+  });
+  enhancedAction->trigger();
+  QVERIFY(enableDialogObserved);
+  QCOMPARE(serviceControl.installs, 1);
+  QCOMPARE(serviceControl.current.state, service::EnhancedModeState::Enabled);
+  QCOMPARE(agent.starts, 1);
+  QVERIFY(enhancedAction->icon().cacheKey() != disabledIcon);
+
+  bool disableDialogObserved = false;
+  QTimer::singleShot(0, &window, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog || dialog->objectName() != QStringLiteral("enhancedModeDialog")) return;
+    auto* status = dialog->findChild<QLabel*>(QStringLiteral("enhancedModeStatus"));
+    auto* change = dialog->findChild<QPushButton*>(QStringLiteral("enhancedModeChangeButton"));
+    if (!status || !change || status->text() != QStringLiteral("Status: Enabled")) return;
+    disableDialogObserved = true;
+    change->click();
+    dialog->reject();
+  });
+  enhancedAction->trigger();
+  QVERIFY(disableDialogObserved);
+  QCOMPARE(serviceControl.removals, 1);
+  QCOMPARE(serviceControl.current.state, service::EnhancedModeState::Disabled);
+  QCOMPARE(agent.stops, 1);
+}
+
+void ApplicationUiBehaviorTests::mainWindowRetriesTransientEnhancedModeStatusFailures() {
+  RecordingWmiOperations wmi;
+  MemoryFileStagingStore staging;
+  MemoryEnhancedModeServiceControl serviceControl;
+  MemoryEnhancedModeAgent agent;
+  serviceControl.queryFailure = QStringLiteral("SCM temporarily unavailable");
+  MutableApplicationStateSource source;
+  source.disks = {{"C:", "Volume{c}", "NTFS", "System", 1000, 500, core::DiskSupport::Supported}};
+  source.snapshot.uwfAvailable = false;
+  source.snapshot.elevated = true;
+
+  ui::MainWindow window({wmi, source, staging, &serviceControl, &agent},
+                        {.uwfCapability = UwfCapability::Unavailable, .compatibilityMode = false, .osProductName = {}, .osEditionId = {}});
+  window.show();
+  QTRY_COMPARE_WITH_TIMEOUT(source.reads, 1, 1000);
+  auto* enhancedAction = actionWithText(&window, QStringLiteral("Enhanced mode"));
+  QVERIFY(enhancedAction);
+  const qint64 failureIcon = enhancedAction->icon().cacheKey();
+  QCOMPARE(serviceControl.queries, 1);
+
+  serviceControl.queryFailure.clear();
+  QTRY_VERIFY_WITH_TIMEOUT(serviceControl.queries >= 2, 2500);
+  QVERIFY(enhancedAction->icon().cacheKey() != failureIcon);
+}
+
+void ApplicationUiBehaviorTests::mainWindowRoutesAuthenticatedServiceRequestsThroughSharedCoordinator() {
+  RecordingWmiOperations wmi;
+  MemoryFileStagingStore staging;
+  staging.entries = {{app::FileStagingKind::File, QStringLiteral("C:\\State\\pending.bin")}};
+  MemoryEnhancedModeServiceControl serviceControl;
+  serviceControl.current = completeEnhancedModeStatus();
+  MemoryEnhancedModeAgent agent;
+  MutableApplicationStateSource source;
+  source.disks = {{"C:", "Volume{c}", "NTFS", "System", 1000, 500, core::DiskSupport::Supported}};
+  source.snapshot.uwfAvailable = false;
+  source.snapshot.elevated = true;
+
+  ui::MainWindow window({wmi, source, staging, &serviceControl, &agent},
+                        {.uwfCapability = UwfCapability::Unavailable, .compatibilityMode = false, .osProductName = {}, .osEditionId = {}});
+  window.show();
+  QTRY_COMPARE_WITH_TIMEOUT(source.reads, 1, 1000);
+  QCOMPARE(agent.starts, 1);
+
+  agent.publishConnectionState(true);
+  agent.requestCommit(41);
+  QTRY_COMPARE_WITH_TIMEOUT(agent.completedRequests.size(), std::size_t{1}, 3000);
+  QCOMPARE(agent.completedRequests.front(), std::uint64_t{41});
+  QCOMPARE(agent.completedResults.front().outcome, app::ApplicationCommandOutcome::Succeeded);
+  QCOMPARE(agent.completedResults.front().skippedEntries, std::size_t{1});
+  QVERIFY(agent.progressRequests.empty());
+  QVERIFY(wmi.queryResults.empty());
+  QVERIFY(wmi.invocations.empty());
+}
+
+void ApplicationUiBehaviorTests::emptyAndMissingRegistryPlansSkipUwfInvocation() {
+  RecordingWmiOperations wmi;
+  RegistryTreeCommitter committer(wmi);
+  const auto emptyCommit = committer.commit({});
+  QCOMPARE(emptyCommit.attempted, std::size_t{0});
+  QCOMPARE(emptyCommit.committed, std::size_t{0});
+  QVERIFY(emptyCommit.failures.empty());
+  QVERIFY(wmi.queryResults.empty());
+
+  const std::string missingKey =
+      QStringLiteral("HKEY_CURRENT_USER\\Software\\HsingYun\\UWF Manager\\Tests\\%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)).toStdString();
+
+  const auto result = committer.commitDeletion({{missingKey, {}}});
+
+  QCOMPARE(result.attempted, std::size_t{1});
+  QCOMPARE(result.skipped, std::size_t{1});
+  QCOMPARE(result.committed, std::size_t{0});
+  QVERIFY(result.failures.empty());
+  QVERIFY(wmi.queryResults.empty());
+  QVERIFY(wmi.invocations.empty());
 }
 
 void ApplicationUiBehaviorTests::diskCommitActionsRouteSelectedTargetsAndHonorCancellation() {
@@ -807,7 +1789,9 @@ void ApplicationUiBehaviorTests::commitDispatcherRoutesAnExistingRegistryValueTh
 
 void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInjectedTransport() {
   RecordingWmiOperations wmi;
-  ui::PowerController controller(wmi, nullptr);
+  MemoryFileStagingStore staging;
+  ui::FileStagingCoordinator coordinator(wmi, staging, UwfCapability::Available, nullptr);
+  ui::PowerController controller({wmi, staging, UwfCapability::Available, coordinator}, nullptr);
 
   QTimer::singleShot(0, this, [] {
     if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->reject();
@@ -816,15 +1800,289 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   QVERIFY(wmi.invocations.empty());
   QVERIFY(wmi.queryResults.empty());
 
-  wmi.queryResults.push_back(
-      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
-  QTimer::singleShot(0, this, [] {
+  RecordingWmiOperations unreadableWmi;
+  MemoryFileStagingStore unreadableStore;
+  unreadableStore.readFailure = QStringLiteral("registry staging data is corrupt");
+  ui::FileStagingCoordinator unreadableCoordinator(unreadableWmi, unreadableStore, UwfCapability::Available, nullptr);
+  ui::PowerController unreadableController({unreadableWmi, unreadableStore, UwfCapability::Available, unreadableCoordinator}, nullptr);
+  bool readFailureStayedInPowerDialog = false;
+  bool readFailureDetailsVisible = false;
+  QTimer unreadableDriver;
+  unreadableDriver.setInterval(1);
+  connect(&unreadableDriver, &QTimer::timeout, this, [&] {
     auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
     if (!dialog) return;
-    if (auto* restart = dialog->findChild<QPushButton*>(QStringLiteral("restartBtn"))) QTest::mouseClick(restart, Qt::LeftButton);
+    auto* details = dialog->findChild<QPlainTextEdit*>(QStringLiteral("powerStagingFailureDetails"));
+    if (!details || !details->isVisible()) return;
+    readFailureStayedInPowerDialog = dialog->objectName() == QStringLiteral("powerConfirmDialog");
+    readFailureDetailsVisible = details->toPlainText().contains(unreadableStore.readFailure);
+    dialog->reject();
+    unreadableDriver.stop();
   });
+  unreadableDriver.start();
+  unreadableController.safeShutdown();
+  QVERIFY(readFailureStayedInPowerDialog);
+  QVERIFY(readFailureDetailsVisible);
+  QVERIFY(unreadableWmi.queryResults.empty());
+  QVERIFY(unreadableWmi.invocations.empty());
+  QVERIFY(!FileStagingHandoff::instance().consume(unreadableStore).has_value());
+
+  RecordingWmiOperations approvedUnreadableWmi;
+  approvedUnreadableWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  MemoryFileStagingStore approvedUnreadableStore;
+  approvedUnreadableStore.readFailure = unreadableStore.readFailure;
+  ui::FileStagingCoordinator approvedUnreadableCoordinator(approvedUnreadableWmi, approvedUnreadableStore, UwfCapability::Available, nullptr);
+  ui::PowerController approvedUnreadableController({approvedUnreadableWmi, approvedUnreadableStore, UwfCapability::Available, approvedUnreadableCoordinator},
+                                                   nullptr);
+  bool unreadableContinuationConfirmed = false;
+  QTimer approvedUnreadableDriver;
+  approvedUnreadableDriver.setInterval(1);
+  connect(&approvedUnreadableDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* details = dialog->findChild<QPlainTextEdit*>(QStringLiteral("powerStagingFailureDetails"));
+    auto* shutdown = dialog->findChild<QPushButton*>(QStringLiteral("dangerBtn"));
+    if (!details || !details->isVisible() || !shutdown || !shutdown->isEnabled()) return;
+    unreadableContinuationConfirmed = shutdown->text() == QStringLiteral("Continue shutdown");
+    QTest::mouseClick(shutdown, Qt::LeftButton);
+    approvedUnreadableDriver.stop();
+  });
+  approvedUnreadableDriver.start();
+  approvedUnreadableController.safeShutdown();
+  QVERIFY(unreadableContinuationConfirmed);
+  QCOMPARE(approvedUnreadableWmi.invocations, std::vector<QString>{QStringLiteral("ShutdownSystem")});
+  const auto approvedUnreadableHandoff = FileStagingHandoff::instance().consume(approvedUnreadableStore);
+  QVERIFY(approvedUnreadableHandoff.has_value());
+  QCOMPARE(approvedUnreadableHandoff->outcome, app::ApplicationCommandOutcome::ContinuationApproved);
+  QCOMPARE(approvedUnreadableHandoff->failedFiles, std::size_t{1});
+  QCOMPARE(approvedUnreadableHandoff->detail, QStringLiteral("The file staging list could not be read:\nregistry staging data is corrupt"));
+
+  wmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  bool emptyPreparationBlockedAction = false;
+  QTimer emptyPreparationDriver;
+  emptyPreparationDriver.setInterval(1);
+  connect(&emptyPreparationDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* restart = dialog->findChild<QPushButton*>(QStringLiteral("restartBtn"));
+    if (!restart) return;
+    if (!restart->isEnabled()) {
+      emptyPreparationBlockedAction = true;
+      return;
+    }
+    QTest::mouseClick(restart, Qt::LeftButton);
+    emptyPreparationDriver.stop();
+  });
+  emptyPreparationDriver.start();
   controller.safeRestart();
+  QVERIFY(emptyPreparationBlockedAction);
   QCOMPARE(wmi.invocations, std::vector<QString>{QStringLiteral("RestartSystem")});
+  const auto emptyHandoff = FileStagingHandoff::instance().consume(staging);
+  QVERIFY(emptyHandoff.has_value());
+  QCOMPARE(emptyHandoff->outcome, app::ApplicationCommandOutcome::Succeeded);
+
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString stagedPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("staged.bin")));
+  QFile stagedFile(stagedPath);
+  QVERIFY(stagedFile.open(QIODevice::WriteOnly));
+  QVERIFY(stagedFile.write("staged") > 0);
+  stagedFile.close();
+  QVERIFY(QDir(directory.path()).mkpath(QStringLiteral("nested")));
+  const QString nestedPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("nested/second.bin")));
+  QFile nestedFile(nestedPath);
+  QVERIFY(nestedFile.open(QIODevice::WriteOnly));
+  QVERIFY(nestedFile.write("nested") > 0);
+  nestedFile.close();
+  const QString thirdPath = QDir::toNativeSeparators(directory.filePath(QStringLiteral("nested/third.bin")));
+  QFile thirdFile(thirdPath);
+  QVERIFY(thirdFile.open(QIODevice::WriteOnly));
+  QVERIFY(thirdFile.write("third") > 0);
+  thirdFile.close();
+  const QString drive = ui::extractDriveLetter(stagedPath);
+  QVERIFY(!drive.isEmpty());
+
+  RecordingWmiOperations stagedWmi;
+  stagedWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  stagedWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                     {"CurrentSession", WmiValue::fromBool(true)},
+                                     {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                     {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                     {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                     {"CommitPending", WmiValue::fromBool(false)},
+                                     {"Protected", WmiValue::fromBool(true)}}});
+  stagedWmi.readResults.push_back(fileExclusionResult());
+  stagedWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  MemoryFileStagingStore stagedStore;
+  stagedStore.entries = {{app::FileStagingKind::File, stagedPath}, {app::FileStagingKind::Directory, QDir::toNativeSeparators(directory.path())}};
+  ui::FileStagingCoordinator stagedCoordinator(stagedWmi, stagedStore, UwfCapability::Available, nullptr);
+  ui::PowerController stagedController({stagedWmi, stagedStore, UwfCapability::Available, stagedCoordinator}, nullptr);
+  bool calculationStateVisible = false;
+  bool expandedFileCountVisible = false;
+  bool concurrentServiceRequestQueued = false;
+  std::optional<app::ApplicationCommandResult> concurrentServiceResult;
+  QTimer stagedDriver;
+  stagedDriver.setInterval(1);
+  connect(&stagedDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* restart = dialog->findChild<QPushButton*>(QStringLiteral("restartBtn"));
+    auto* stagingDetail = dialog->findChild<QLabel*>(QStringLiteral("powerStagingDetail"));
+    if (!restart || !stagingDetail) return;
+    if (!restart->isEnabled()) {
+      calculationStateVisible = stagingDetail->isVisible() && stagingDetail->text() == QStringLiteral("Calculating files for automatic commit…");
+      return;
+    }
+    if (stagingDetail->isVisible()) {
+      expandedFileCountVisible = stagingDetail->text().contains(QStringLiteral("3 file(s)"));
+    }
+    if (!concurrentServiceRequestQueued) {
+      concurrentServiceRequestQueued = true;
+      stagedCoordinator.requestCommit(ui::FileStagingRequestOrigin::ServicePreshutdown,
+                                      [&](const ui::FileStagingBatchResult& result) { concurrentServiceResult = result.command; });
+      QCOMPARE(QApplication::activeModalWidget()->objectName(), QStringLiteral("powerConfirmDialog"));
+    }
+    QTest::mouseClick(restart, Qt::LeftButton);
+    stagedDriver.stop();
+  });
+  stagedDriver.start();
+  stagedController.safeRestart();
+  QVERIFY(calculationStateVisible);
+  QVERIFY(expandedFileCountVisible);
+  QVERIFY(concurrentServiceRequestQueued);
+  QVERIFY(concurrentServiceResult.has_value());
+  QCOMPARE(concurrentServiceResult->committedFiles, std::size_t{3});
+  QCOMPARE(stagedWmi.invocations,
+           std::vector<QString>({QStringLiteral("CommitFile"), QStringLiteral("CommitFile"), QStringLiteral("CommitFile"), QStringLiteral("RestartSystem")}));
+  QCOMPARE(stagedWmi.invocationPaths,
+           std::vector<QString>({QStringLiteral("volume-path"), QStringLiteral("volume-path"), QStringLiteral("volume-path"), QStringLiteral("filter-path")}));
+
+  RecordingWmiOperations failedWmi;
+  failedWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  failedWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                     {"CurrentSession", WmiValue::fromBool(true)},
+                                     {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                     {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                     {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                     {"CommitPending", WmiValue::fromBool(false)},
+                                     {"Protected", WmiValue::fromBool(true)}}});
+  failedWmi.readResults.push_back(fileExclusionResult());
+  failedWmi.invocationFailure = std::make_exception_ptr(WmiProviderError(5, "commit staged file", "provider failure"));
+  ui::FileStagingCoordinator failedCoordinator(failedWmi, stagedStore, UwfCapability::Available, nullptr);
+  ui::PowerController failedController({failedWmi, stagedStore, UwfCapability::Available, failedCoordinator}, nullptr);
+  QDialog* failedDialog = nullptr;
+  bool failedActionClicked = false;
+  bool failureDetailsVisible = false;
+  bool failureStayedInDialog = false;
+  QTimer failureDriver;
+  failureDriver.setInterval(1);
+  connect(&failureDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    if (!failedDialog) failedDialog = dialog;
+    if (auto* details = dialog->findChild<QPlainTextEdit*>(QStringLiteral("powerStagingFailureDetails")); details && details->isVisible()) {
+      failureDetailsVisible = details->toPlainText().contains(QStringLiteral("provider failure"));
+      failureStayedInDialog = dialog == failedDialog;
+      dialog->reject();
+      failureDriver.stop();
+      return;
+    }
+    if (!failedActionClicked) {
+      if (auto* shutdown = dialog->findChild<QPushButton*>(QStringLiteral("dangerBtn"))) {
+        if (!shutdown->isEnabled()) return;
+        failedActionClicked = true;
+        QTest::mouseClick(shutdown, Qt::LeftButton);
+      }
+    }
+  });
+  failureDriver.start();
+  failedController.safeShutdown();
+  QCOMPARE(failedWmi.invocations, std::vector<QString>({QStringLiteral("CommitFile"), QStringLiteral("CommitFile"), QStringLiteral("CommitFile")}));
+  QVERIFY(failureDetailsVisible);
+  QVERIFY(failureStayedInDialog);
+
+  RecordingWmiOperations continuedWmi;
+  continuedWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  continuedWmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("volume-path")},
+                                        {"CurrentSession", WmiValue::fromBool(true)},
+                                        {"DriveLetter", WmiValue::fromString(drive.toStdString())},
+                                        {"VolumeName", WmiValue::fromString("Volume{staging}")},
+                                        {"BindByDriveLetter", WmiValue::fromBool(true)},
+                                        {"CommitPending", WmiValue::fromBool(false)},
+                                        {"Protected", WmiValue::fromBool(true)}}});
+  continuedWmi.readResults.push_back(fileExclusionResult());
+  continuedWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  continuedWmi.invocationFailure = std::make_exception_ptr(WmiProviderError(5, "commit staged file", "provider failure"));
+  ui::FileStagingCoordinator continuedCoordinator(continuedWmi, stagedStore, UwfCapability::Available, nullptr);
+  ui::PowerController continuedController({continuedWmi, stagedStore, UwfCapability::Available, continuedCoordinator}, nullptr);
+  bool continueActionClicked = false;
+  bool continueDecisionClicked = false;
+  QTimer continueDriver;
+  continueDriver.setInterval(1);
+  connect(&continueDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* details = dialog->findChild<QPlainTextEdit*>(QStringLiteral("powerStagingFailureDetails"));
+    auto* shutdown = dialog->findChild<QPushButton*>(QStringLiteral("dangerBtn"));
+    if (details && details->isVisible() && shutdown) {
+      continueDecisionClicked = shutdown->text() == QStringLiteral("Continue shutdown");
+      QTest::mouseClick(shutdown, Qt::LeftButton);
+      continueDriver.stop();
+      return;
+    }
+    if (!continueActionClicked && shutdown) {
+      if (!shutdown->isEnabled()) return;
+      continueActionClicked = true;
+      QTest::mouseClick(shutdown, Qt::LeftButton);
+    }
+  });
+  continueDriver.start();
+  continuedController.safeShutdown();
+  QVERIFY(continueDecisionClicked);
+  QCOMPARE(continuedWmi.invocations,
+           std::vector<QString>({QStringLiteral("CommitFile"), QStringLiteral("CommitFile"), QStringLiteral("CommitFile"), QStringLiteral("ShutdownSystem")}));
+  const auto failureHandoff = FileStagingHandoff::instance().consume(stagedStore);
+  QVERIFY(failureHandoff.has_value());
+  QCOMPARE(failureHandoff->outcome, app::ApplicationCommandOutcome::CompletedWithFailures);
+  QCOMPARE(failureHandoff->failedFiles, std::size_t{1});
+
+  RecordingWmiOperations disabledWmi;
+  disabledWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(false)}, {"NextEnabled", WmiValue::fromBool(false)}}});
+  disabledWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(false)}, {"NextEnabled", WmiValue::fromBool(false)}}});
+  ui::FileStagingCoordinator disabledCoordinator(disabledWmi, stagedStore, UwfCapability::Available, nullptr);
+  ui::PowerController disabledController({disabledWmi, stagedStore, UwfCapability::Available, disabledCoordinator}, nullptr);
+  bool stagingSummaryHidden = false;
+  bool disabledActionInitiallyBlocked = false;
+  QTimer disabledDriver;
+  disabledDriver.setInterval(1);
+  connect(&disabledDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* shutdown = dialog->findChild<QPushButton*>(QStringLiteral("dangerBtn"));
+    auto* stagingDetail = dialog->findChild<QLabel*>(QStringLiteral("powerStagingDetail"));
+    if (!shutdown || !stagingDetail) return;
+    if (!shutdown->isEnabled()) {
+      disabledActionInitiallyBlocked = true;
+      return;
+    }
+    stagingSummaryHidden = !stagingDetail->isVisible();
+    QTest::mouseClick(shutdown, Qt::LeftButton);
+    disabledDriver.stop();
+  });
+  disabledDriver.start();
+  disabledController.safeShutdown();
+  QVERIFY(disabledActionInitiallyBlocked);
+  QVERIFY(stagingSummaryHidden);
+  QCOMPARE(disabledWmi.invocations, std::vector<QString>{QStringLiteral("ShutdownSystem")});
 }
 
 void ApplicationUiBehaviorTests::commitBatchUsesAuthoritativeExistenceForEveryOutcome() {
@@ -892,15 +2150,72 @@ void ApplicationUiBehaviorTests::uiUtilitiesPreserveDriveComboAndDirtySemantics(
   QCOMPARE(chip->objectName(), QStringLiteral("statusChip"));
 }
 
+void ApplicationUiBehaviorTests::mainWindowMountsFileStagingOnlyWherePerFileCommitIsSupported() {
+  RecordingWmiOperations wmi;
+  MemoryFileStagingStore staging;
+  MutableApplicationStateSource source;
+  const std::string systemDrive = drive::systemLetter();
+  QVERIFY(!systemDrive.empty());
+  const std::string dataDrive = systemDrive == "C:" ? "D:" : "C:";
+  staging.entries = {{app::FileStagingKind::File, QString::fromStdString(dataDrive) + QStringLiteral("\\Data\\state.bin")},
+                     {app::FileStagingKind::Directory, QString::fromStdString(systemDrive) + QStringLiteral("\\ProgramData\\Vendor")}};
+  source.disks = {{dataDrive, "Volume{data}", "NTFS", "Removable data", 1000, 500, core::DiskSupport::NotFixedLocalDisk},
+                  {systemDrive, "Volume{system}", "NTFS", "System", 1000, 500, core::DiskSupport::Supported}};
+  source.snapshot = editableSnapshot();
+
+  ui::MainWindow window({wmi, source, staging},
+                        {.uwfCapability = UwfCapability::Available, .compatibilityMode = false, .osProductName = {}, .osEditionId = {}});
+  window.show();
+  QTRY_COMPARE_WITH_TIMEOUT(source.reads, 1, 1000);
+
+  auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("mainTabs"));
+  QVERIFY(tabs);
+  QCOMPARE(tabs->count(), 2);
+  QCOMPARE(window.findChildren<ui::FileStagingWidget*>().size(), 1);
+
+  auto* dataTab = qobject_cast<ui::DiskTab*>(tabs->widget(0));
+  auto* systemTab = qobject_cast<ui::DiskTab*>(tabs->widget(1));
+  QVERIFY(dataTab && systemTab);
+  auto* dataInnerTabs = dataTab->findChild<QTabWidget*>(QStringLiteral("innerTabs"));
+  auto* systemInnerTabs = systemTab->findChild<QTabWidget*>(QStringLiteral("innerTabs"));
+  QVERIFY(dataInnerTabs && systemInnerTabs);
+  QCOMPARE(dataInnerTabs->count(), 1);
+  QCOMPARE(systemInnerTabs->count(), 3);
+  QCOMPARE(systemInnerTabs->tabText(1), QStringLiteral("Registry exclusions"));
+  QCOMPARE(systemInnerTabs->tabText(2), QStringLiteral("File staging"));
+
+  auto* systemStaging = qobject_cast<ui::FileStagingWidget*>(systemInnerTabs->widget(2));
+  QVERIFY(systemStaging);
+  QCOMPARE(systemStaging->driveLetter(), QString::fromStdString(systemDrive));
+  auto* systemStagingList = systemStaging->findChild<QListWidget*>(QStringLiteral("exclusionList"));
+  QVERIFY(systemStagingList);
+  QCOMPARE(systemStagingList->count(), 1);
+
+  dataTab->setActiveInfoPage(ui::DiskTab::InfoPage::FileStaging);
+  QCOMPARE(dataTab->activeInfoPage(), ui::DiskTab::InfoPage::FileExclusions);
+  systemTab->setActiveInfoPage(ui::DiskTab::InfoPage::RegistryExclusions);
+  std::ranges::reverse(source.disks);
+  window.refresh();
+  QCOMPARE(source.reads, 2);
+  for (int index = 0; index < tabs->count(); ++index) {
+    auto* rebuilt = qobject_cast<ui::DiskTab*>(tabs->widget(index));
+    QVERIFY(rebuilt);
+    const auto expectedPage =
+        rebuilt->driveLetter() == QString::fromStdString(dataDrive) ? ui::DiskTab::InfoPage::FileExclusions : ui::DiskTab::InfoPage::RegistryExclusions;
+    QCOMPARE(rebuilt->activeInfoPage(), expectedPage);
+  }
+}
+
 void ApplicationUiBehaviorTests::mainWindowQuietStartupInitializesWhileRemainingHidden() {
   RecordingWmiOperations wmi;
+  MemoryFileStagingStore staging;
   MutableApplicationStateSource source;
   source.disks = {{"C:", "Volume{c}", "NTFS", "System", 1000, 500, core::DiskSupport::Supported}};
   source.snapshot.uwfAvailable = false;
   source.snapshot.elevated = true;
   source.snapshot.unavailableReason = "embedded provider absent";
 
-  ui::MainWindow window({wmi, source},
+  ui::MainWindow window({wmi, source, staging},
                         {.uwfCapability = UwfCapability::Unavailable, .compatibilityMode = false, .osProductName = {}, .osEditionId = {}});
   window.startInTray();
 
@@ -920,11 +2235,14 @@ void ApplicationUiBehaviorTests::mainWindowQuietStartupInitializesWhileRemaining
 
 void ApplicationUiBehaviorTests::mainWindowDistinguishesInitialFailureFromCommittedUnavailableState() {
   RecordingWmiOperations wmi;
+  MemoryFileStagingStore staging;
 
   MutableApplicationStateSource failingSource;
   failingSource.failure = QStringLiteral("initial provider failure");
+  MemoryEnhancedModeServiceControl serviceControl;
   {
-    ui::MainWindow window({wmi, failingSource},
+    MemoryEnhancedModeAgent agent;
+    ui::MainWindow window({wmi, failingSource, staging, &serviceControl, &agent},
                           {.uwfCapability = UwfCapability::Available, .compatibilityMode = false, .osProductName = {}, .osEditionId = {}});
     window.show();
     QTRY_COMPARE_WITH_TIMEOUT(failingSource.reads, 1, 1000);
@@ -933,8 +2251,10 @@ void ApplicationUiBehaviorTests::mainWindowDistinguishesInitialFailureFromCommit
     QCOMPARE(tabs->count(), 0);
     auto* refresh = actionWithText(&window, QStringLiteral("Refresh"));
     auto* import = actionWithText(&window, QStringLiteral("Import"));
+    auto* enhanced = actionWithText(&window, QStringLiteral("Enhanced mode"));
     QVERIFY(refresh && refresh->isEnabled());
     QVERIFY(import && !import->isEnabled());
+    QVERIFY(enhanced && enhanced->isEnabled());
     bool reasonVisible = false;
     for (auto* label : window.findChildren<QLabel*>()) reasonVisible = reasonVisible || label->text().contains(failingSource.failure);
     QVERIFY(reasonVisible);
@@ -947,10 +2267,10 @@ void ApplicationUiBehaviorTests::mainWindowDistinguishesInitialFailureFromCommit
   source.snapshot.elevated = true;
   source.snapshot.unavailableReason = "embedded provider absent";
   {
-    ui::MainWindow window({wmi, source}, {.uwfCapability = UwfCapability::Unavailable,
-                                          .compatibilityMode = true,
-                                          .osProductName = QStringLiteral("Compatibility OS"),
-                                          .osEditionId = QStringLiteral("Custom")});
+    ui::MainWindow window({wmi, source, staging}, {.uwfCapability = UwfCapability::Unavailable,
+                                                   .compatibilityMode = true,
+                                                   .osProductName = QStringLiteral("Compatibility OS"),
+                                                   .osEditionId = QStringLiteral("Custom")});
     window.show();
     QTRY_COMPARE_WITH_TIMEOUT(source.reads, 1, 1000);
     auto* tabs = window.findChild<QTabWidget*>(QStringLiteral("mainTabs"));

@@ -36,6 +36,7 @@
 #include <QVBoxLayout>
 #include <exception>
 #include <format>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -78,7 +79,7 @@ class CommandTextEdit : public QTextEdit {
   }
 
   void contextMenuEvent(QContextMenuEvent* e) override {
-    QMenu* menu = createStandardContextMenu();
+    const std::unique_ptr<QMenu> menu(createStandardContextMenu());
     const auto actions = menu->actions();
     for (const QAction* act : actions) {
       if (act->shortcut() == QKeySequence::Copy) {
@@ -88,7 +89,6 @@ class CommandTextEdit : public QTextEdit {
       }
     }
     menu->exec(e->globalPos());
-    delete menu;
   }
 
  private:

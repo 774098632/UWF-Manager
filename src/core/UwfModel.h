@@ -140,6 +140,12 @@ enum class DiskSupport : int {
   QueryFailed,        // 调用 Win32 API 失败
 };
 
+[[nodiscard]] constexpr bool supportsVolumeProtection(const DiskSupport support) noexcept {
+  return support == DiskSupport::Supported || support == DiskSupport::FileSystemLimited;
+}
+
+[[nodiscard]] constexpr bool supportsFileOverlayOperations(const DiskSupport support) noexcept { return support == DiskSupport::Supported; }
+
 // 本机上枚举出的一个磁盘卷的只读信息。
 struct DiskInfo {
   std::string driveLetter;  // 归一化盘符

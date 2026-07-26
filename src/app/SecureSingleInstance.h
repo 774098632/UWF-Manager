@@ -20,6 +20,10 @@
 #include <QString>
 #include <memory>
 
+#include "ApplicationCommand.h"
+
+class QLocalSocket;
+
 namespace uwf::app {
 
 // 进程级安全单实例协调器。对外只暴露主实例资格与激活请求；Windows 命名
@@ -35,7 +39,7 @@ class SecureSingleInstance final : public QObject {
 
   enum class AcquireResult {
     Primary,
-    ActivatedExisting,
+    ForwardedExisting,
     Unprotected,
   };
 
@@ -46,24 +50,32 @@ class SecureSingleInstance final : public QObject {
   SecureSingleInstance(const SecureSingleInstance&) = delete;
   SecureSingleInstance& operator=(const SecureSingleInstance&) = delete;
 
-  // 尝试激活已有受信实例；不存在时注册当前进程为主实例。Unprotected 表示
-  // 服务名被无法认证的对象占用或监听失败，调用方可以继续运行但不再保证单实例。
-  [[nodiscard]] AcquireResult acquire();
+  // 把启动命令转交已有受信实例；不存在时注册当前进程为主实例。CommitStage
+  // 会同步等待主实例返回最终批次结果，其他命令只等待主实例接收确认。
+  // Unprotected 表示服务名被无法认证的对象占用或监听失败，调用方可以继续
+  // 运行，但不再保证单实例。
+  [[nodiscard]] AcquireResult acquire(ApplicationCommandKind command = ApplicationCommandKind::Activate, ApplicationCommandResult* forwardedResult = nullptr);
   [[nodiscard]] QString errorString() const;
 
-  // MainWindow 建立 activationRequested 连接后调用。此前到达并通过认证的
-  // 请求会合并为一次通知，避免窗口构造期间丢失激活事件。
-  void enableActivationNotifications();
+  // MainWindow 建立信号连接后调用。此前到达并通过认证的激活请求会合并，
+  // 提交请求则逐个保留并投递，避免窗口构造期间丢失命令。
+  void enableCommandNotifications();
+
+  // 完成一个 commitStageRequested 请求。requestToken 是进程内令牌，不是
+  // 客户端可控的协议 requestId；重复、过期令牌被安全忽略。
+  void completeCommand(std::uint64_t requestToken, const ApplicationCommandResult& result);
 
  signals:
   void activationRequested();
+  void commitStageRequested(std::uint64_t requestToken);
 
  private:
   class Private;
   std::unique_ptr<Private> d;
 
   void processPendingConnections();
-  void deliverPendingActivation();
+  void processSocket(QLocalSocket* socket);
+  void deliverPendingCommands();
 };
 
 }  // namespace uwf::app

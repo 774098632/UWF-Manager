@@ -21,9 +21,18 @@
 #include <QByteArray>
 #include <QCryptographicHash>
 #include <QFile>
+#include <QHash>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QPointer>
+#include <QQueue>
 #include <QString>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <limits>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -172,22 +181,60 @@ QString instanceServerName(const QString& discriminator) {
 
 // 不能用 QLocalSocket 直接连接未知服务端：Windows 命名管道默认允许服务端
 // impersonate 客户端，高权限进程连接被抢注的管道会泄露自己的安全上下文。
-bool forwardToRunningInstance(const QString& serverName) {
+bool writeAll(const HANDLE pipe, const QByteArray& bytes) {
+  qsizetype offset = 0;
+  while (offset < bytes.size()) {
+    const qsizetype remaining = bytes.size() - offset;
+    const DWORD chunk = static_cast<DWORD>(std::min<qsizetype>(remaining, static_cast<qsizetype>(std::numeric_limits<DWORD>::max())));
+    DWORD written = 0;
+    if (!WriteFile(pipe, bytes.constData() + offset, chunk, &written, nullptr) || written == 0) return false;
+    offset += static_cast<qsizetype>(written);
+  }
+  return true;
+}
+
+std::optional<QByteArray> readFrame(const HANDLE pipe) {
+  QByteArray bytes;
+  std::array<char, 4096> chunk{};
+  std::size_t expectedSize = 0;
+  for (;;) {
+    DWORD read = 0;
+    if (!ReadFile(pipe, chunk.data(), static_cast<DWORD>(chunk.size()), &read, nullptr)) return std::nullopt;
+    if (read == 0) return std::nullopt;
+    bytes.append(chunk.data(), static_cast<qsizetype>(read));
+    if (expectedSize == 0) expectedSize = applicationCommandFrameSize(bytes);
+    if (expectedSize != 0 && static_cast<std::size_t>(bytes.size()) >= expectedSize) {
+      if (static_cast<std::size_t>(bytes.size()) != expectedSize) return std::nullopt;
+      return bytes;
+    }
+  }
+}
+
+std::uint64_t nextWireRequestId() {
+  static std::atomic_uint64_t sequence{1};
+  return (static_cast<std::uint64_t>(GetCurrentProcessId()) << 32U) ^ sequence.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool forwardToRunningInstance(const QString& serverName, const ApplicationCommandKind command, ApplicationCommandResult* result) {
   const std::wstring pipeName = (QStringLiteral("\\\\.\\pipe\\") + serverName).toStdWString();
   if (!WaitNamedPipeW(pipeName.c_str(), 300)) return false;
 
   constexpr DWORD kSecurityFlags = SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | SECURITY_EFFECTIVE_ONLY;
-  const UniqueHandle pipe(CreateFileW(pipeName.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, kSecurityFlags, nullptr));
+  const UniqueHandle pipe(CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, kSecurityFlags, nullptr));
   if (!pipe.valid()) return false;
 
   ULONG serverProcessId = 0;
   if (!GetNamedPipeServerProcessId(pipe.get(), &serverProcessId) || !isTrustedPeerProcess(static_cast<DWORD>(serverProcessId))) return false;
 
-  AllowSetForegroundWindow(static_cast<DWORD>(serverProcessId));
-  constexpr char kRaiseCommand[] = "raise";
-  DWORD written = 0;
-  return WriteFile(pipe.get(), kRaiseCommand, static_cast<DWORD>(sizeof(kRaiseCommand) - 1), &written, nullptr) != FALSE &&
-         written == static_cast<DWORD>(sizeof(kRaiseCommand) - 1);
+  if (command == ApplicationCommandKind::Activate) AllowSetForegroundWindow(static_cast<DWORD>(serverProcessId));
+  const std::uint64_t requestId = nextWireRequestId();
+  if (!writeAll(pipe.get(), encodeCommandRequest({command, requestId}))) return false;
+  const auto responseBytes = readFrame(pipe.get());
+  if (!responseBytes) return false;
+  const auto response = decodeCommandResult(*responseBytes);
+  if (!response || response->first != requestId) return false;
+  if (result) *result = response->second;
+  return true;
 }
 
 bool isTrustedLocalSocket(QLocalSocket* socket) {
@@ -203,6 +250,11 @@ class SecureSingleInstance::Private final {
  public:
   explicit Private(QString name) : serverName(std::move(name)) {}
 
+  struct PendingResponse {
+    QPointer<QLocalSocket> socket;
+    std::uint64_t wireRequestId = 0;
+  };
+
   QLocalServer server;
   QString serverName;
   QString error;
@@ -210,6 +262,10 @@ class SecureSingleInstance::Private final {
   AcquireResult result = AcquireResult::Unprotected;
   bool notificationsEnabled = false;
   bool activationPending = false;
+  std::uint64_t nextRequestToken = 1;
+  QHash<QLocalSocket*, QByteArray> buffers;
+  QHash<std::uint64_t, PendingResponse> pendingResponses;
+  QQueue<std::uint64_t> pendingCommitNotifications;
 };
 
 SecureSingleInstance::SecureSingleInstance(QObject* parent) : SecureSingleInstance(Scope{}, parent) {}
@@ -221,13 +277,13 @@ SecureSingleInstance::SecureSingleInstance(const Scope& scope, QObject* parent)
 
 SecureSingleInstance::~SecureSingleInstance() = default;
 
-SecureSingleInstance::AcquireResult SecureSingleInstance::acquire() {
+SecureSingleInstance::AcquireResult SecureSingleInstance::acquire(const ApplicationCommandKind command, ApplicationCommandResult* forwardedResult) {
   if (d->acquired) return d->result;
   d->acquired = true;
   const QString& serverName = d->serverName;
 
-  if (forwardToRunningInstance(serverName)) {
-    d->result = AcquireResult::ActivatedExisting;
+  if (forwardToRunningInstance(serverName, command, forwardedResult)) {
+    d->result = AcquireResult::ForwardedExisting;
     return d->result;
   }
 
@@ -238,8 +294,8 @@ SecureSingleInstance::AcquireResult SecureSingleInstance::acquire() {
   }
 
   // probe 与 listen 之间可能被另一实例抢注，认证并重试一次转交。
-  if (forwardToRunningInstance(serverName)) {
-    d->result = AcquireResult::ActivatedExisting;
+  if (forwardToRunningInstance(serverName, command, forwardedResult)) {
+    d->result = AcquireResult::ForwardedExisting;
     return d->result;
   }
   d->error = d->server.errorString();
@@ -248,28 +304,110 @@ SecureSingleInstance::AcquireResult SecureSingleInstance::acquire() {
 
 QString SecureSingleInstance::errorString() const { return d->error; }
 
-void SecureSingleInstance::enableActivationNotifications() {
+void SecureSingleInstance::enableCommandNotifications() {
   d->notificationsEnabled = true;
-  // newConnection 可能在外部连接 activationRequested 之前已经发出；主动清空
-  // server 队列，并与此前认证成功但尚未投递的请求合并。
+  // newConnection 可能在外部建立信号连接之前已经发出；主动清空 server
+  // 队列，并投递此前已完成认证的命令。
   processPendingConnections();
+  deliverPendingCommands();
 }
 
 void SecureSingleInstance::processPendingConnections() {
   while (QLocalSocket* socket = d->server.nextPendingConnection()) {
-    if (isTrustedLocalSocket(socket)) {
-      if (socket->bytesAvailable() == 0) socket->waitForReadyRead(100);
-      if (socket->readAll() == QByteArrayLiteral("raise")) d->activationPending = true;
+    if (!isTrustedLocalSocket(socket)) {
+      socket->abort();
+      socket->deleteLater();
+      continue;
     }
-    socket->deleteLater();
+    d->buffers.insert(socket, {});
+    connect(socket, &QLocalSocket::readyRead, this, [this, socket] { processSocket(socket); });
+    connect(socket, &QLocalSocket::disconnected, this, [this, socket] {
+      d->buffers.remove(socket);
+      for (auto it = d->pendingResponses.begin(); it != d->pendingResponses.end();) {
+        if (it->socket == socket)
+          it = d->pendingResponses.erase(it);
+        else
+          ++it;
+      }
+      socket->deleteLater();
+    });
+    processSocket(socket);
   }
-  deliverPendingActivation();
 }
 
-void SecureSingleInstance::deliverPendingActivation() {
-  if (!d->notificationsEnabled || !d->activationPending) return;
-  d->activationPending = false;
-  emit activationRequested();
+void SecureSingleInstance::processSocket(QLocalSocket* socket) {
+  auto buffer = d->buffers.find(socket);
+  if (buffer == d->buffers.end() || !socket) return;
+  buffer.value().append(socket->readAll());
+
+  try {
+    const auto expectedSize = applicationCommandFrameSize(buffer.value());
+    if (expectedSize == 0 || static_cast<std::size_t>(buffer.value().size()) < expectedSize) return;
+    const auto request = decodeCommandRequest(buffer.value());
+    if (!request) return;
+    d->buffers.erase(buffer);
+
+    if (request->kind == ApplicationCommandKind::Activate) {
+      d->activationPending = true;
+      socket->write(encodeCommandResult(request->requestId, {}));
+      socket->flush();
+      socket->disconnectFromServer();
+      deliverPendingCommands();
+      return;
+    }
+    if (request->kind == ApplicationCommandKind::EnsureRunning) {
+      socket->write(encodeCommandResult(request->requestId, {}));
+      socket->flush();
+      socket->disconnectFromServer();
+      return;
+    }
+
+    const std::uint64_t requestToken = d->nextRequestToken++;
+    d->pendingResponses.insert(requestToken, {socket, request->requestId});
+    d->pendingCommitNotifications.enqueue(requestToken);
+    deliverPendingCommands();
+  } catch (const std::exception&) {
+    d->buffers.remove(socket);
+    socket->abort();
+  }
+}
+
+void SecureSingleInstance::deliverPendingCommands() {
+  if (!d->notificationsEnabled) return;
+  if (d->activationPending) {
+    d->activationPending = false;
+    emit activationRequested();
+  }
+  while (!d->pendingCommitNotifications.isEmpty()) {
+    const std::uint64_t requestToken = d->pendingCommitNotifications.dequeue();
+    if (d->pendingResponses.contains(requestToken)) emit commitStageRequested(requestToken);
+  }
+}
+
+void SecureSingleInstance::completeCommand(const std::uint64_t requestToken, const ApplicationCommandResult& result) {
+  const auto pendingIt = d->pendingResponses.constFind(requestToken);
+  if (pendingIt == d->pendingResponses.cend()) return;
+  if (!pendingIt->socket) {
+    d->pendingResponses.remove(requestToken);
+    return;
+  }
+  const QPointer<QLocalSocket> socket = pendingIt->socket;
+  const std::uint64_t wireRequestId = pendingIt->wireRequestId;
+
+  QByteArray response;
+  try {
+    response = encodeCommandResult(wireRequestId, result);
+  } catch (...) {
+    d->pendingResponses.remove(requestToken);
+    if (socket) socket->abort();
+    throw;
+  }
+
+  const auto pending = d->pendingResponses.take(requestToken);
+  if (!pending.socket) return;
+  pending.socket->write(response);
+  pending.socket->flush();
+  pending.socket->disconnectFromServer();
 }
 
 }  // namespace uwf::app

@@ -61,23 +61,38 @@ set(UWF_OVERLAY_RUNTIME_SOURCES
         src/util/RegistryKey.cpp
         src/util/StringUtil.h
         src/util/StringUtil.cpp
+        src/util/WindowsFileSystem.h
+        src/util/WindowsFileSystem.cpp
         src/util/WindowsVersion.h
         src/util/WindowsVersion.cpp
 )
 
 add_library(UwfOverlayRuntime STATIC ${UWF_OVERLAY_RUNTIME_SOURCES})
 target_include_directories(UwfOverlayRuntime PUBLIC "${PROJECT_SOURCE_DIR}/src")
-target_link_libraries(UwfOverlayRuntime PUBLIC Qt6::Widgets Qt6::Svg PRIVATE user32 shcore dwmapi)
+target_link_libraries(UwfOverlayRuntime PUBLIC Qt6::Widgets Qt6::Svg PRIVATE advapi32 user32 shcore dwmapi)
 uwf_configure_cpp_target(UwfOverlayRuntime)
 
 set(UWF_SOURCES
         main.cpp
         src/app/CrashHandler.h
         src/app/CrashHandler.cpp
+        src/app/ApplicationCommand.h
+        src/app/ApplicationCommand.cpp
         src/app/SecureSingleInstance.h
         src/app/SecureSingleInstance.cpp
         src/app/StartupOptions.h
         src/app/StartupOptions.cpp
+        src/app/FileStagingStore.h
+        src/app/FileStagingStore.cpp
+        src/app/FileStagingCodec.h
+        src/app/FileStagingCodec.cpp
+        src/app/FileStagingConflictPolicy.h
+        src/app/FileStagingConflictPolicy.cpp
+        src/service/EnhancedModeAgent.h
+        src/service/EnhancedModeAgent.cpp
+        src/service/EnhancedModeService.h
+        src/service/EnhancedModeServiceControl.cpp
+        src/service/EnhancedModeServiceRuntime.cpp
         src/util/DriveLetter.h
         src/util/DriveLetter.cpp
         src/util/ByteFormat.h
@@ -117,12 +132,26 @@ set(UWF_SOURCES
         src/uwf/api/UwfmgrCli.cpp
         src/uwf/UwfSnapshot.h
         src/uwf/UwfSnapshot.cpp
+        src/uwf/FileStagingCommitter.h
+        src/uwf/FileStagingCommitter.cpp
+        src/uwf/FileStagingTask.h
+        src/uwf/FileStagingTask.cpp
+        src/uwf/FileStagingHandoff.h
+        src/uwf/FileStagingHandoff.cpp
+        src/uwf/RegistryTreeCommitter.h
+        src/uwf/RegistryTreeCommitter.cpp
         src/ui/MainWindow.h
         src/ui/MainWindow.cpp
         src/ui/AboutDialog.h
         src/ui/AboutDialog.cpp
         src/ui/CommitDispatcher.h
         src/ui/CommitDispatcher.cpp
+        src/ui/EnhancedModeDialog.h
+        src/ui/EnhancedModeDialog.cpp
+        src/ui/FileStagingCoordinator.h
+        src/ui/FileStagingCoordinator.cpp
+        src/ui/FileStagingPresentation.h
+        src/ui/FileStagingPresentation.cpp
         src/ui/TrayController.h
         src/ui/TrayController.cpp
         src/ui/ApplyPlanDialog.h
@@ -146,6 +175,7 @@ set(UWF_SOURCES
         src/ui/OverlayPresentationController.cpp
         src/ui/PowerConfirmDialog.h
         src/ui/PowerConfirmDialog.cpp
+        src/ui/UiTiming.h
         src/ui/PowerController.h
         src/ui/PowerController.cpp
         src/ui/MarqueeHintBox.h
@@ -167,6 +197,8 @@ set(UWF_SOURCES
         src/ui/GlobalStatusPanel.cpp
         src/ui/ExclusionListWidget.h
         src/ui/ExclusionListWidget.cpp
+        src/ui/FileStagingWidget.h
+        src/ui/FileStagingWidget.cpp
         src/ui/OverlayFilesDialog.h
         src/ui/OverlayFilesDialog.cpp
         src/ui/ImportDialog.h
@@ -218,6 +250,7 @@ set(UWF_APP_RESOURCE_FILES
         resources/icons/check_light.svg
         resources/icons/shutdown.svg
         resources/icons/restart.svg
+        resources/icons/enhanced.svg
         resources/icons/commit.svg
         resources/icons/theme_sun.svg
         resources/icons/theme_moon.svg
@@ -239,7 +272,7 @@ qt_add_translations(UWF
         resources/i18n/qtbase_zh_CN.ts
 )
 
-target_link_libraries(UWF PRIVATE UwfOverlayRuntime Qt6::Widgets Qt6::Svg Qt6::Network)
+target_link_libraries(UWF PRIVATE UwfOverlayRuntime Qt6::Widgets Qt6::Svg Qt6::Network advapi32 shell32 userenv wtsapi32)
 uwf_configure_target(UWF)
 
 qt_import_plugins(UWF NO_DEFAULT

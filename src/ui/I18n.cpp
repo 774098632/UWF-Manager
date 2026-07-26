@@ -75,6 +75,8 @@ I18n& I18n::instance() {
 
 QString I18n::applicationTitle() { return tr("Unified Write Filter (UWF) Manager"); }
 
+QString I18n::enhancedModeServiceDescription() { return tr("UWF Manager enhanced mode helper service"); }
+
 I18n::I18n() : m_lang(detectSystemLang()) { applyLang(m_lang); }
 
 I18n::Lang I18n::detectSystemLang() {

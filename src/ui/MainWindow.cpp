@@ -43,6 +43,9 @@
 #include <utility>
 #include <vector>
 
+#include "../app/FileStagingStore.h"
+#include "../service/EnhancedModeAgent.h"
+#include "../service/EnhancedModeService.h"
 #include "../util/DriveLetter.h"
 #include "../util/Log.h"
 #include "../util/PathMatch.h"
@@ -52,6 +55,7 @@
 #include "ApplyPlanDialog.h"
 #include "Dialogs.h"
 #include "DiskTab.h"
+#include "EnhancedModeDialog.h"
 #include "GlobalStatusPanel.h"
 #include "HoverHintController.h"
 #include "I18n.h"
@@ -86,10 +90,16 @@ ApplicationStateSource& systemApplicationStateSource() {
   return source;
 }
 
+service::EnhancedModeServiceControl& systemEnhancedModeServiceControl() {
+  static service::WindowsEnhancedModeServiceControl control;
+  return control;
+}
+
 }  // namespace
 
 MainWindow::MainWindow(const UwfCapability uwfCapability, bool compatibilityMode, const QString& osProductName, const QString& osEditionId, QWidget* parent)
-    : MainWindow(MainWindowServices{embeddedWmiSession(), systemApplicationStateSource()},
+    : MainWindow(MainWindowServices{embeddedWmiSession(), systemApplicationStateSource(), app::registryFileStagingStore(embeddedWmiSession(), uwfCapability),
+                                    &systemEnhancedModeServiceControl()},
                  MainWindowStartup{uwfCapability, compatibilityMode, osProductName, osEditionId}, parent) {}
 
 MainWindow::MainWindow(MainWindowServices services, MainWindowStartup startup, QWidget* parent)
@@ -97,6 +107,7 @@ MainWindow::MainWindow(MainWindowServices services, MainWindowStartup startup, Q
       m_uwfCapability(startup.uwfCapability),
       m_session(services.uwf),
       m_stateSource(services.state),
+      m_fileStaging(services.fileStaging),
       m_compatibilityMode(startup.compatibilityMode),
       m_osProductName(std::move(startup.osProductName)),
       m_osEditionId(std::move(startup.osEditionId)) {
@@ -108,24 +119,59 @@ MainWindow::MainWindow(MainWindowServices services, MainWindowStartup startup, Q
   setWindowIcon(QIcon(":/icons/app.svg"));
   resize(1380, 760);
   setWindowOpacity(0.0);
-  m_hoverHints = new HoverHintController(this, this);
-  m_chrome = new WindowChromeController(this, this);
+  m_hoverHints = std::make_unique<HoverHintController>(this);
+  m_chrome = std::make_unique<WindowChromeController>(this);
 
   // 内容控件与首屏数据统一交给 showEvent 调度的 rebuildUi()——它一次 buildUi()
   // + refresh() 建好。构造期不再 buildUi()/refresh()：那份产出会被 rebuildUi
   // 整个销毁重建，等于白建一遍 UI、白连一次 WMI、白读一份快照。
 
   // 系统托盘（图标 + 右键菜单）——独立组件，由本窗口编排：接它的"激活窗口"信号。
-  m_tray = new TrayController(this);
-  connect(m_tray, &TrayController::activateWindowRequested, this, &MainWindow::raiseToFront);
-  connect(m_tray, &TrayController::exitApplicationRequested, this, &MainWindow::requestExit);
+  m_tray = std::make_unique<TrayController>(this);
+  connect(m_tray.get(), &TrayController::activateWindowRequested, this, &MainWindow::raiseToFront);
+  connect(m_tray.get(), &TrayController::exitApplicationRequested, this, &MainWindow::requestExit);
 
-  m_overlayPresentation = new OverlayPresentationController(m_session, *this, *m_tray, this);
-  connect(m_overlayPresentation, &OverlayPresentationController::activateMainWindowRequested, this, &MainWindow::raiseToFront);
-  connect(m_overlayPresentation, &OverlayPresentationController::exitApplicationRequested, this, &MainWindow::requestExit);
-  m_power = new PowerController(m_session, this, this);
-  connect(m_overlayPresentation, &OverlayPresentationController::safeShutdownRequested, m_power, &PowerController::safeShutdown);
-  connect(m_overlayPresentation, &OverlayPresentationController::safeRestartRequested, m_power, &PowerController::safeRestart);
+  m_overlayPresentation = std::make_unique<OverlayPresentationController>(m_session, *this, *m_tray);
+  connect(m_overlayPresentation.get(), &OverlayPresentationController::activateMainWindowRequested, this, &MainWindow::raiseToFront);
+  connect(m_overlayPresentation.get(), &OverlayPresentationController::exitApplicationRequested, this, &MainWindow::requestExit);
+  m_fileStagingCoordinator = std::make_unique<FileStagingCoordinator>(m_session, m_fileStaging, m_uwfCapability, this);
+  m_power = std::make_unique<PowerController>(PowerControllerServices{m_session, m_fileStaging, m_uwfCapability, *m_fileStagingCoordinator}, this);
+  connect(m_overlayPresentation.get(), &OverlayPresentationController::safeShutdownRequested, m_power.get(), &PowerController::safeShutdown);
+  connect(m_overlayPresentation.get(), &OverlayPresentationController::safeRestartRequested, m_power.get(), &PowerController::safeRestart);
+
+  if (services.enhancedMode) {
+    m_enhancedModeManager = std::make_unique<service::EnhancedModeManager>(*services.enhancedMode, m_session, m_uwfCapability, this);
+    if (services.enhancedModeAgent) {
+      m_enhancedModeAgent = services.enhancedModeAgent;
+    } else {
+      m_ownedEnhancedModeAgent = std::make_unique<service::EnhancedModeAgent>();
+      m_enhancedModeAgent = m_ownedEnhancedModeAgent.get();
+    }
+    m_enhancedModeStatusRetry = new QTimer(this);
+    m_enhancedModeStatusRetry->setSingleShot(true);
+    connect(m_enhancedModeStatusRetry, &QTimer::timeout, this, &MainWindow::refreshEnhancedModeStatus);
+    connect(m_enhancedModeManager.get(), &service::EnhancedModeManager::statusChanged, this, &MainWindow::applyEnhancedModeStatus);
+    connect(m_enhancedModeManager.get(), &service::EnhancedModeManager::agentConnectionStateChanged, this, [this](const service::EnhancedModeAgentState state) {
+      m_enhancedModeStatus.agentState = state;
+      refreshThemedUi();
+    });
+    connect(m_enhancedModeAgent, &service::EnhancedModeAgent::connectionStateChanged, this, [this](const bool connected) {
+      if (!m_enhancedModeManager || !m_enhancedModeStatus.serviceContractSatisfied()) return;
+      m_enhancedModeManager->setAgentState(connected ? service::EnhancedModeAgentState::Connected : service::EnhancedModeAgentState::Disconnected);
+      refreshEnhancedModeStatus();
+    });
+    connect(m_enhancedModeAgent, &service::EnhancedModeAgent::commitStageRequested, this, [this](const std::uint64_t requestId) {
+      m_serviceCommitRequestId = requestId;
+      requestFileStagingCommit(FileStagingRequestOrigin::ServicePreshutdown, [this, requestId](const FileStagingBatchResult& result) {
+        if (m_serviceCommitRequestId == requestId) m_serviceCommitRequestId.reset();
+        m_enhancedModeAgent->complete(requestId, result.command);
+      });
+    });
+    connect(m_fileStagingCoordinator.get(), &FileStagingCoordinator::progressChanged, this, [this](const std::size_t processed, const std::size_t total) {
+      if (m_serviceCommitRequestId) m_enhancedModeAgent->reportProgress(*m_serviceCommitRequestId, processed, total);
+    });
+    refreshEnhancedModeStatus();
+  }
 
   // 4 个 commit 槽的实际工作都在 CommitDispatcher 里跑；提交期间暂停 Overlay
   // 控制器的 usage timer，避免并发读取 WMI。
@@ -138,24 +184,18 @@ MainWindow::MainWindow(MainWindowServices services, MainWindowStartup startup, Q
 }
 
 MainWindow::~MainWindow() {
-  // QObject 子对象默认要等 QMainWindow / QObject 基类析构时才删除。这里按
-  // 依赖逆序释放，让持有 timer/widget 引用的控制器先于依赖对象结束生命周期；
   // thread_local WMI session 本身会在 UI 线程退出时统一释放。
   m_commit.reset();
 
-  delete m_power;
-  m_power = nullptr;
-  delete m_overlayPresentation;  // 先于它引用的 tray
-  m_overlayPresentation = nullptr;
-  delete m_tray;
-  m_tray = nullptr;
-
-  // 两个 qApp 级事件过滤器也在窗口仍完整时移除，避免进入 QWidget / QObject
-  // 基类析构后还持有一个正在拆解的 root window。
-  delete m_chrome;
-  m_chrome = nullptr;
-  delete m_hoverHints;
-  m_hoverHints = nullptr;
+  if (m_enhancedModeAgent) {
+    disconnect(m_enhancedModeAgent, nullptr, this, nullptr);
+    m_enhancedModeAgent->stop();
+  }
+  m_enhancedModeManager.reset();
+  m_ownedEnhancedModeAgent.reset();
+  m_enhancedModeAgent = nullptr;
+  // 其余控制器由 unique_ptr 按成员声明的逆序释放。两个 qApp 级事件过滤器
+  // 因而也会在窗口仍完整时移除。
 }
 
 void MainWindow::startInTray() {
@@ -167,6 +207,52 @@ void MainWindow::startInTray() {
 }
 
 void MainWindow::raiseToFront() { m_chrome->raiseToFront(m_firstShowDone); }
+
+void MainWindow::requestFileStagingCommit(const FileStagingRequestOrigin origin, FileStagingCoordinator::Completion completion) {
+  m_fileStagingCoordinator->requestCommit(origin, std::move(completion));
+}
+
+void MainWindow::refreshEnhancedModeStatus() {
+  if (!m_enhancedModeManager) return;
+  try {
+    applyEnhancedModeStatus(m_enhancedModeManager->status());
+  } catch (const std::exception& error) {
+    recordEnhancedModeStatusFailure(QString::fromUtf8(error.what()));
+  } catch (...) {
+    recordEnhancedModeStatusFailure(I18n::tr("The enhanced mode status read failed because of an unknown error."));
+  }
+}
+
+void MainWindow::recordEnhancedModeStatusFailure(const QString& detail) {
+  // 查询失败只说明 SCM 当前不可观测，不能反推出服务已经消失。保留最后一次
+  // 已确认的工件和代理所有权，仅把展示降级并重试；否则一次瞬时错误就会主动
+  // 断开健康代理，且 PRESHUTDOWN 拉起的 --quiet 实例会被单实例转交后立即退出。
+  m_enhancedModeStatus.state = service::EnhancedModeState::RepairRequired;
+  m_enhancedModeStatus.detail = detail;
+  refreshThemedUi();
+  if (!m_enhancedModeStatusRetry || m_enhancedModeStatusRetry->isActive()) return;
+  m_enhancedModeStatusRetry->start(m_enhancedModeStatusRetryDelayMs);
+  m_enhancedModeStatusRetryDelayMs = std::min(m_enhancedModeStatusRetryDelayMs * 2, kEnhancedModeStatusRetryMaximumMs);
+}
+
+void MainWindow::applyEnhancedModeStatus(const service::EnhancedModeStatus& status) {
+  if (m_enhancedModeStatusRetry) m_enhancedModeStatusRetry->stop();
+  m_enhancedModeStatusRetryDelayMs = kEnhancedModeStatusRetryInitialMs;
+  m_enhancedModeStatus = status;
+  if (m_enhancedModeAgent) {
+    // 代理依赖完整的 SCM 契约：不仅要运行并绑定当前文件，还必须使用
+    // LocalSystem 独立进程、接受预关机事件并具备启动用户进程所需权限。
+    // 对损坏配置持续重连只会掩盖“需要修复”的真实状态。
+    if (status.serviceContractSatisfied()) {
+      if (!m_enhancedModeAgent->running()) m_enhancedModeManager->setAgentState(service::EnhancedModeAgentState::Connecting);
+      m_enhancedModeAgent->start();
+    } else {
+      m_enhancedModeAgent->stop();
+      m_enhancedModeManager->setAgentState(service::EnhancedModeAgentState::Unobserved);
+    }
+  }
+  refreshThemedUi();
+}
 
 void MainWindow::buildUi() {
   // 标题随语言切换重译，故每次 buildUi（含 rebuildUi 路径）都重设一次；
@@ -224,11 +310,17 @@ void MainWindow::buildUi() {
 
   m_actShutdown = tb->addAction(I18n::tr("Safe shutdown"));
   m_actShutdown->setToolTip(I18n::tr("Shut down safely, even when the UWF overlay is full."));
-  connect(m_actShutdown, &QAction::triggered, m_power, &PowerController::safeShutdown);
+  connect(m_actShutdown, &QAction::triggered, m_power.get(), &PowerController::safeShutdown);
 
   m_actRestart = tb->addAction(I18n::tr("Safe restart"));
   m_actRestart->setToolTip(I18n::tr("Restart safely, even when the UWF overlay is full."));
-  connect(m_actRestart, &QAction::triggered, m_power, &PowerController::safeRestart);
+  connect(m_actRestart, &QAction::triggered, m_power.get(), &PowerController::safeRestart);
+
+  if (m_enhancedModeManager) {
+    m_actEnhancedMode = tb->addAction(I18n::tr("Enhanced mode"));
+    m_actEnhancedMode->setToolTip(I18n::tr("Coordinate automatic file staging with Windows shutdown and restart."));
+    connect(m_actEnhancedMode, &QAction::triggered, this, &MainWindow::showEnhancedMode);
+  }
 
   tb->addSeparator();
 
@@ -251,7 +343,7 @@ void MainWindow::buildUi() {
   auto* hubAction = tb->addAction("");
   hubAction->setCheckable(true);
   hubAction->setToolTip(I18n::tr("Show or hide the overlay hub."));
-  connect(hubAction, &QAction::toggled, m_overlayPresentation, &OverlayPresentationController::setHubEnabled);
+  connect(hubAction, &QAction::toggled, m_overlayPresentation.get(), &OverlayPresentationController::setHubEnabled);
   if (auto* btn = qobject_cast<QToolButton*>(tb->widgetForAction(hubAction))) {
     btn->setToolButtonStyle(Qt::ToolButtonIconOnly);
   }
@@ -494,6 +586,7 @@ void MainWindow::rebuildUi() {
 
   // 重置所有指针成员；buildUi 会重新填充。
   m_actRefresh = m_actImport = m_actPlan = m_actShutdown = m_actRestart = nullptr;
+  m_actEnhancedMode = nullptr;
   m_actLog = m_actAbout = m_actLang = m_actTheme = nullptr;
   m_tabs = nullptr;
   m_global = nullptr;
@@ -615,6 +708,22 @@ void MainWindow::refreshThemedUi() {
   if (m_actPlan) m_actPlan->setIcon(tm.icon(":/icons/apply.svg"));
   if (m_actShutdown) m_actShutdown->setIcon(tm.icon(":/icons/shutdown.svg"));
   if (m_actRestart) m_actRestart->setIcon(tm.icon(":/icons/restart.svg"));
+  if (m_actEnhancedMode) {
+    switch (m_enhancedModeStatus.state) {
+      case service::EnhancedModeState::Enabled:
+        m_actEnhancedMode->setIcon(ThemeManager::iconWithColor(
+            ":/icons/enhanced.svg",
+            m_enhancedModeStatus.agentState == service::EnhancedModeAgentState::Connected ? tm.color(Sem::AddOk) : tm.color(Sem::Accent)));
+        break;
+      case service::EnhancedModeState::Stopped:
+      case service::EnhancedModeState::RepairRequired:
+        m_actEnhancedMode->setIcon(ThemeManager::iconWithColor(":/icons/enhanced.svg", tm.color(Sem::Warn)));
+        break;
+      case service::EnhancedModeState::Disabled:
+        m_actEnhancedMode->setIcon(tm.icon(":/icons/enhanced.svg"));
+        break;
+    }
+  }
   if (m_actLog) m_actLog->setIcon(tm.icon(":/icons/log.svg"));
   if (m_actAbout) m_actAbout->setIcon(tm.icon(":/icons/info.svg"));
   // 纯图标按钮（语言 / 主题）：没有文字，图标要在按钮里居中，故用 AlignHCenter 渲染，
@@ -657,13 +766,13 @@ void MainWindow::rebuildTabs(const std::vector<core::DiskInfo>& disks) {
   // 重建前按盘符记下两件事，重建后尽量还原——避免 refresh 把用户的"上下文"
   // 都跳走：
   //   1) 当前选中的卷（外层 TAB 的盘符）；
-  //   2) 每个 DiskTab 内层"文件 / 注册表排除"TAB 的索引（仅系统盘有 1=注册表）。
-  // 内层索引用 int 而不是 tabText，因为 text 受 i18n 影响（切语言后不稳定）；
-  // 索引在所有语言下都稳定。
+  //   2) 每个 DiskTab 内层"文件排除 / 注册表排除 / 文件暂存"的业务页。
+  // 内层页按语义枚举保存，既不依赖翻译文本，也不会因注册表宿主页多一个 TAB
+  // 而把相同数值索引恢复到另一项功能。
   const QString prevDriveLetter = m_tabs->currentIndex() >= 0 ? m_tabs->tabText(m_tabs->currentIndex()) : QString();
-  QMap<QString, int> prevInfoTab;
+  QMap<QString, DiskTab::InfoPage> prevInfoTab;
   for (const auto& t : std::as_const(m_diskTabs))
-    if (t) prevInfoTab.insert(t->driveLetter(), t->activeInfoTabIndex());
+    if (t) prevInfoTab.insert(t->driveLetter(), t->activeInfoPage());
 
   // QTabWidget::clear() 只摘掉标签页、不销毁页面控件——上一轮的 DiskTab 会继续
   // 作为 m_tabs 的子对象存活，每次 refresh 泄漏一组（要到下次 rebuildUi 删掉
@@ -676,9 +785,9 @@ void MainWindow::rebuildTabs(const std::vector<core::DiskInfo>& disks) {
   m_diskTabs.clear();
   const QString sysDl = systemDriveLetter();
 
-  // 注册表排除是全局的，只挂在一块盘的 TAB 上：系统盘优先，其次第一块可用盘，
-  // 最后退回第一块磁盘。这样即使所有卷都不支持文件排除 / 单文件提交，注册表
-  // 排除列表和注册表提交入口仍然可见。没有任何磁盘时不挂载注册表 TAB。
+  // 注册表排除是全局能力，只挂在一块盘的 TAB 上：系统盘优先，其次第一块
+  // 可用盘，最后退回第一块磁盘。文件暂存按卷分区展示，只挂在支持逐文件
+  // overlay 操作的卷上；所有页仍通过同一个 FileStagingStore 原子保存统一快照。
   std::optional<std::size_t> registryHostIndex;
   if (!sysDl.isEmpty()) {
     for (std::size_t i = 0; i < disks.size(); ++i) {
@@ -692,7 +801,7 @@ void MainWindow::rebuildTabs(const std::vector<core::DiskInfo>& disks) {
   if (!registryHostIndex) {
     for (std::size_t i = 0; i < disks.size(); ++i) {
       const auto& d = disks[i];
-      if (d.support == core::DiskSupport::Supported || d.support == core::DiskSupport::FileSystemLimited) {
+      if (core::supportsVolumeProtection(d.support)) {
         registryHostIndex = i;
         break;
       }
@@ -704,23 +813,30 @@ void MainWindow::rebuildTabs(const std::vector<core::DiskInfo>& disks) {
 
   for (std::size_t i = 0; i < disks.size(); ++i) {
     const auto& d = disks[i];
-    auto* tab = new DiskTab(d, /*showRegistry=*/registryHostIndex && i == *registryHostIndex, this);
+    const bool hostsRegistry = registryHostIndex && i == *registryHostIndex;
+    DiskTab* tab = nullptr;
+    if (m_uwfCapability == UwfCapability::Available && core::supportsFileOverlayOperations(d.support)) {
+      tab = new DiskTab(d, hostsRegistry, dialogs::systemFileDialogs(), m_fileStaging, this);
+    } else {
+      tab = new DiskTab(d, hostsRegistry, dialogs::systemFileDialogs(), this);
+    }
     const QString label = QString::fromStdString(d.driveLetter);
     const bool limited = d.support == core::DiskSupport::FileSystemLimited;
-    const bool ok = d.support == core::DiskSupport::Supported || limited;
+    const bool ok = core::supportsVolumeProtection(d.support);
     const bool isSys = QString::fromStdString(d.driveLetter).toUpper() == sysDl;
     auto& tm = ThemeManager::instance();
     const QIcon icon = !ok ? tm.icon(":/icons/disk_off.svg") : isSys ? tm.icon(":/icons/disk_system.svg") : tm.icon(":/icons/disk.svg");
     const int idx = m_tabs->addTab(tab, icon, label);
-    const QString sysExtra = isSys ? I18n::tr(" (System drive: also manages the global registry exclusion list here.)") : QString();
+    const QString registryExtra = hostsRegistry ? I18n::tr(" (Also manages global registry exclusions.)") : QString();
     if (!ok || limited) {
-      m_tabs->setTabToolTip(idx, QString::fromStdString(diskSupportText(d.support, d.fileSystem)) + sysExtra);
+      m_tabs->setTabToolTip(idx, QString::fromStdString(diskSupportText(d.support, d.fileSystem)) + registryExtra);
     } else {
-      m_tabs->setTabToolTip(idx, I18n::tr("Switch to protection settings and file exclusions for volume %1.%2").arg(label, sysExtra));
+      m_tabs->setTabToolTip(idx, I18n::tr("Switch to protection settings, file exclusions, and file staging for volume %1.%2").arg(label, registryExtra));
     }
-    // 还原本卷内层 TAB 的选中索引。原本不在（磁盘新插入）→ 保持默认 0。
+    // 还原本卷内层业务页。原本不在（磁盘新插入）或该页当前不存在时，
+    // 保持默认的文件排除页。
     if (const auto it = prevInfoTab.constFind(label); it != prevInfoTab.constEnd()) {
-      tab->setActiveInfoTabIndex(it.value());
+      tab->setActiveInfoPage(it.value());
     }
     m_diskTabs.push_back(tab);
     connect(tab, &DiskTab::pendingChanged, this, &MainWindow::updatePendingSummary);
@@ -798,6 +914,7 @@ void MainWindow::updateInteractionAvailability() {
     if (action) action->setEnabled(editable);
   for (QAction* action : {m_actShutdown, m_actRestart})
     if (action) action->setEnabled(elevated && m_snapshot.uwfAvailable);
+  if (m_actEnhancedMode) m_actEnhancedMode->setEnabled(elevated);
 
   // setData / applySnapshot 会按快照恢复控件可写性；这里再叠加主窗口
   // 所有的对账门禁。未提权时 DiskTab 自己只禁用编辑控件、保留正常
@@ -850,7 +967,7 @@ void MainWindow::showPlan() {
   // 再 refresh，避免在回调里递归进 refresh 的弹窗 / WMI 读。
   ApplyPlanDialog dlg(m_global, m_diskTabs, m_snapshot, m_session, this);
   connect(&dlg, &ApplyPlanDialog::reconciliationRequired, this, &MainWindow::reconcileAfterApply, Qt::QueuedConnection);
-  connect(&dlg, &ApplyPlanDialog::safeRestartRequested, m_power, &PowerController::safeRestart);
+  connect(&dlg, &ApplyPlanDialog::safeRestartRequested, m_power.get(), &PowerController::safeRestart);
   dlg.exec();
 }
 
@@ -869,6 +986,13 @@ void MainWindow::showAbout() {
 void MainWindow::showLogs() {
   LogViewerDialog dlg(this);
   dlg.exec();
+}
+
+void MainWindow::showEnhancedMode() {
+  if (!m_enhancedModeManager) return;
+  EnhancedModeDialog dialog(*m_enhancedModeManager, this);
+  dialog.exec();
+  refreshEnhancedModeStatus();
 }
 
 // 4 个 commit 槽自身只是 dispatcher 的代理——拿到 DiskTab / ExclusionListWidget /

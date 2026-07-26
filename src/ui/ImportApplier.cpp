@@ -63,6 +63,10 @@ ImportReportRow outcomeToRow(const api::UwfmgrCommand& c, ExclusionListWidget::I
       r.status = ImportReportRow::Status::Failed;
       r.detail = I18n::tr("Rejected by UWF's blacklist (system file / Windows / pagefile / etc.)");
       break;
+    case ExclusionListWidget::ImportOutcome::RejectedConflict:
+      r.status = ImportReportRow::Status::Failed;
+      r.detail = I18n::tr("The path overlaps an existing file staging entry");
+      break;
   }
   return r;
 }

@@ -40,10 +40,12 @@
 #include "../util/DriveLetter.h"
 #include "../util/PathMatch.h"
 #include "../util/RegistryKey.h"
+#include "../uwf/RegistryTreeCommitter.h"
 #include "../uwf/api/Types.h"
 #include "CommitBatch.h"
 #include "Dialogs.h"
 #include "I18n.h"
+#include "UiTiming.h"
 #include "UiUtil.h"
 
 namespace uwf::ui {
@@ -110,7 +112,6 @@ struct RegCommitTarget {
 };
 
 std::optional<std::vector<std::string>> scanRegistryKeyTreeWithProgress(QWidget* parent, const QString& title, const std::string& key) {
-  constexpr int kMinVisibleMs = 1000;
   std::atomic_bool canceled{false};
   std::atomic_bool done{false};
   std::atomic<std::uint64_t> scanned{0};
@@ -143,9 +144,9 @@ std::optional<std::vector<std::string>> scanRegistryKeyTreeWithProgress(QWidget*
     if (done.load()) {
       if (!closeQueued) {
         closeQueued = true;
-        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - shownAt).count();
-        const int delayMs = static_cast<int>(std::max<std::int64_t>(0, static_cast<std::int64_t>(kMinVisibleMs) - elapsedMs));
-        QTimer::singleShot(delayMs, &progress, &QProgressDialog::accept);
+        const auto elapsed = std::chrono::steady_clock::now() - shownAt;
+        const auto remaining = timing::kMinimumProgressDisplayDuration - elapsed;
+        QTimer::singleShot(std::max(std::chrono::steady_clock::duration::zero(), remaining), &progress, &QProgressDialog::accept);
       }
       return;
     }
@@ -384,11 +385,10 @@ void CommitDispatcher::commitRegistryKey(const QString& key, const QString& valu
     // 也让结果表里不再出现一堆无意义的 Skipped 行。代价是没值的纯结构 key
     // 整个被跳过——CommitRegistry 本来对它就什么都做不了，跳过是对的。
     try {
-      for (const auto& k : regkey::collectKeyTree(normKey)) {
-        const QString kText = QString::fromStdString(k);
-        for (const auto& vn : regkey::valueNames(k)) {
-          targets.append({k, vn, vn.empty() ? (kText + " : (Default)") : (kText + " : " + QString::fromStdString(vn))});
-        }
+      for (const auto& item : planRegistryTreeCommit(normKey)) {
+        const QString keyDisplay = QString::fromStdString(item.key);
+        targets.append(
+            {item.key, item.valueName, item.valueName.empty() ? (keyDisplay + " : (Default)") : (keyDisplay + " : " + QString::fromStdString(item.valueName))});
       }
     } catch (const std::exception& error) {
       warning(m_parent, I18n::tr("Commit failed"), I18n::tr("Failed to enumerate registry values: %1").arg(QString::fromUtf8(error.what())));

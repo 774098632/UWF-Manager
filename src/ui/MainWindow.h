@@ -20,18 +20,31 @@
 #include <QPointer>
 #include <QVector>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "../service/EnhancedModeService.h"
 #include "../uwf/UwfSnapshot.h"
 #include "../uwf/wmi/WmiClient.h"
 #include "CommitDispatcher.h"
+#include "FileStagingCoordinator.h"
+
+namespace uwf::app {
+class FileStagingStore;
+}
+
+namespace uwf::service {
+class EnhancedModeAgent;
+class EnhancedModeAgentConnection;
+}  // namespace uwf::service
 
 class QTabWidget;
 class QLabel;
 class QAction;
 class QCloseEvent;
 class QEvent;
+class QTimer;
 
 namespace uwf::ui {
 
@@ -60,10 +73,15 @@ class ApplicationStateSource {
   [[nodiscard]] virtual ApplicationState read(UwfCapability capability) = 0;
 };
 
-// 两个服务均由调用方拥有，生命周期必须覆盖 MainWindow。
+// 服务对象均由调用方拥有，生命周期必须覆盖 MainWindow。
 struct MainWindowServices {
   WmiOperations& uwf;
   ApplicationStateSource& state;
+  app::FileStagingStore& fileStaging;
+  service::EnhancedModeServiceControl* enhancedMode = nullptr;
+  // 可选的代理传输由调用方拥有；为空时 MainWindow 创建生产命名管道实现。
+  // 注入对象的生命周期必须覆盖 MainWindow。
+  service::EnhancedModeAgentConnection* enhancedModeAgent = nullptr;
 };
 
 struct MainWindowStartup {
@@ -92,6 +110,7 @@ class MainWindow : public QMainWindow {
 
   // 由"单实例"机制调用：另一个实例被启动时，把本窗口从最小化恢复并带到前台。
   void raiseToFront();
+  void requestFileStagingCommit(FileStagingRequestOrigin origin, FileStagingCoordinator::Completion completion);
 
  public slots:
   void refresh();
@@ -99,6 +118,7 @@ class MainWindow : public QMainWindow {
   void showImport();
   void showAbout();
   void showLogs();
+  void showEnhancedMode();
   // 单文件 / 单目录提交：按 QFileInfo::isDir 自动分发——目录走 QDirIterator
   // 递归遍历挨个 CommitFile，文件直接 CommitFile。DiskTab.onCommitFile /
   // onCommitDir、ExclusionListWidget 右键 commit、覆盖层文件对话框右键 commit
@@ -116,6 +136,9 @@ class MainWindow : public QMainWindow {
   void showEvent(QShowEvent* ev) override;
 
  private:
+  static constexpr int kEnhancedModeStatusRetryInitialMs = 1000;
+  static constexpr int kEnhancedModeStatusRetryMaximumMs = 30'000;
+
   void buildUi();
   // **切换主题 / 切换语言的唯一刷新入口**——整体重建 toolbar + central widget，
   // 让 tr() 拿到新译文、let QSS 在新 widget 上从干净状态应用。两个低频操作
@@ -142,6 +165,9 @@ class MainWindow : public QMainWindow {
   // 染色 svg、给 hoverHint 默认文案塞主题相关色。仅供 buildUi 末尾调用一次。
   // 不再作为对外的"主题切换刷新"路径——切主题统一走 rebuildUi。
   void refreshThemedUi();
+  void refreshEnhancedModeStatus();
+  void recordEnhancedModeStatusFailure(const QString& detail);
+  void applyEnhancedModeStatus(const service::EnhancedModeStatus& status);
   void requestExit();
 
   QTabWidget* m_tabs = nullptr;
@@ -154,15 +180,16 @@ class MainWindow : public QMainWindow {
   // widget 时控制器自动跟着 deleteLater，不必单独管理生命周期。
   TransientLabel* m_statusCtl = nullptr;
   TransientLabel* m_hoverCtl = nullptr;
-  HoverHintController* m_hoverHints = nullptr;
-  WindowChromeController* m_chrome = nullptr;
+  std::unique_ptr<HoverHintController> m_hoverHints;
+  std::unique_ptr<WindowChromeController> m_chrome;
 
-  // 引用方式持有 toolbar 6 个 action，主题切换时按当前主题前景色重染 svg。
+  // 引用方式持有 toolbar action，主题切换时按当前主题前景色重染 svg。
   QAction* m_actRefresh = nullptr;
   QAction* m_actImport = nullptr;
   QAction* m_actPlan = nullptr;
   QAction* m_actShutdown = nullptr;
   QAction* m_actRestart = nullptr;
+  QAction* m_actEnhancedMode = nullptr;
   QAction* m_actAbout = nullptr;
   QAction* m_actLog = nullptr;
   QAction* m_actLang = nullptr;
@@ -174,15 +201,21 @@ class MainWindow : public QMainWindow {
   bool m_exitRequested = false;
 
   // 系统托盘（图标 + 右键菜单）——独立组件，由本窗口编排。
-  TrayController* m_tray = nullptr;
-  OverlayPresentationController* m_overlayPresentation = nullptr;
-  PowerController* m_power = nullptr;
+  // 这些控制器存在明确的依赖顺序，使用成员声明的逆序析构表达：
+  // Power → FileStaging → Overlay → Tray → Chrome → Hover。
+  std::unique_ptr<TrayController> m_tray;
+  std::unique_ptr<OverlayPresentationController> m_overlayPresentation;
+  std::unique_ptr<FileStagingCoordinator> m_fileStagingCoordinator;
+  std::unique_ptr<PowerController> m_power;
+  service::EnhancedModeAgentConnection* m_enhancedModeAgent = nullptr;
+  QTimer* m_enhancedModeStatusRetry = nullptr;
 
   // UWF 能力在启动期探测一次并固定。当前 UI 线程随后只复用 embedded
   // namespace session 读取动态状态；内部代理断线重建不会改变能力结论。
   const UwfCapability m_uwfCapability;
   WmiOperations& m_session;
   ApplicationStateSource& m_stateSource;
+  app::FileStagingStore& m_fileStaging;
 
   QVector<QPointer<DiskTab>> m_diskTabs;
   std::vector<core::DiskInfo> m_disks;
@@ -193,6 +226,11 @@ class MainWindow : public QMainWindow {
   // 在这里头：CommitDispatcher 自己持有 UwfVolume / UwfRegistryFilter 包装，
   // 共享 m_session + 引用 m_snapshot + Overlay 控制器的 usage timer。
   std::unique_ptr<CommitDispatcher> m_commit;
+  std::unique_ptr<service::EnhancedModeManager> m_enhancedModeManager;
+  std::unique_ptr<service::EnhancedModeAgentConnection> m_ownedEnhancedModeAgent;
+  service::EnhancedModeStatus m_enhancedModeStatus;
+  std::optional<std::uint64_t> m_serviceCommitRequestId;
+  int m_enhancedModeStatusRetryDelayMs = kEnhancedModeStatusRetryInitialMs;
 
   // 兼容模式标志与系统标识（系统版本未通过校验时为 true）。提示文案每次
   // buildUi 按当前语言现翻译，故只存原始数据：rebuildUi 重建面板时连带重译。

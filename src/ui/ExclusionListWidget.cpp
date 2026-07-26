@@ -43,6 +43,8 @@
 #include <string_view>
 #include <utility>
 
+#include "../app/FileStagingConflictPolicy.h"
+#include "../app/FileStagingStore.h"
 #include "../core/Config.h"
 #include "../core/RegistryExclusionPolicy.h"
 #include "../util/DriveLetter.h"
@@ -135,6 +137,10 @@ QString forbidExclusionReason(const QString& rawPath, const QString& volumeDl) {
 // （HKLM\... → HKEY_LOCAL_MACHINE\...）。注册表键的存储 / 展示全部先过这一步，
 // 口径才统一。
 QString normRegKey(const QString& key) { return QString::fromStdString(regkey::normalize(key.toStdString())); }
+
+bool isFileStagingRegistryRoot(const QString& key) {
+  return QString::compare(normRegKey(key), QString::fromStdString(regkey::normalize(std::string(app::kFileStagingRegistryRoot))), Qt::CaseInsensitive) == 0;
+}
 
 // 注册表排除规则：
 //   1. 路径不得包含非法字符（控制字符、正斜杠、`\\` 空段、引导反斜杠等）；
@@ -248,10 +254,16 @@ QIcon composeWithBadge(const QIcon& base, Badge badge) {
 }
 }  // namespace
 
-ExclusionListWidget::ExclusionListWidget(Kind kind, QWidget* parent) : ExclusionListWidget(kind, dialogs::systemFileDialogs(), parent) {}
+ExclusionListWidget::ExclusionListWidget(Kind kind, QWidget* parent) : ExclusionListWidget(kind, dialogs::systemFileDialogs(), nullptr, parent) {}
 
 ExclusionListWidget::ExclusionListWidget(Kind kind, dialogs::FileDialogProvider& fileDialogs, QWidget* parent)
-    : QWidget(parent), m_kind(kind), m_fileDialogs(fileDialogs) {
+    : ExclusionListWidget(kind, fileDialogs, nullptr, parent) {}
+
+ExclusionListWidget::ExclusionListWidget(Kind kind, dialogs::FileDialogProvider& fileDialogs, app::FileStagingConflictPolicy& conflicts, QWidget* parent)
+    : ExclusionListWidget(kind, fileDialogs, &conflicts, parent) {}
+
+ExclusionListWidget::ExclusionListWidget(Kind kind, dialogs::FileDialogProvider& fileDialogs, app::FileStagingConflictPolicy* conflicts, QWidget* parent)
+    : QWidget(parent), m_kind(kind), m_fileDialogs(fileDialogs), m_conflicts(conflicts) {
   auto* layout = new QVBoxLayout(this);
   layout->setContentsMargins(0, 0, 0, 0);
   layout->setSpacing(8);
@@ -454,6 +466,32 @@ QString ExclusionListWidget::entryFullPath(const QListWidgetItem* item) const {
   return p;
 }
 
+QString ExclusionListWidget::absoluteFilePath(const QString& path) const {
+  if (m_kind != Kind::File || path.isEmpty()) return path;
+  return QDir::toNativeSeparators(path.startsWith('\\') ? m_driveLetter + path : path);
+}
+
+QStringList ExclusionListWidget::effectiveFileExclusions() const {
+  if (m_kind != Kind::File) return {};
+  QStringList result;
+  const auto appendUnique = [&](const QString& path) {
+    const QString absolute = absoluteFilePath(path);
+    if (!result.contains(absolute, Qt::CaseInsensitive)) result.append(absolute);
+  };
+  // 当前会话排除项仍会影响本次关机提交，即使用户已把它标为下次会话移除；
+  // 因此约束集合是 current 与“应用待改动后的 next”的并集。
+  for (const auto& path : m_current) appendUnique(path);
+  for (const auto& path : m_next) {
+    if (!setContainsCI(m_removed, path)) appendUnique(path);
+  }
+  for (const auto& path : std::as_const(m_added)) appendUnique(path);
+  return result;
+}
+
+void ExclusionListWidget::publishFileExclusions() const {
+  if (m_conflicts && m_kind == Kind::File) m_conflicts->setFileExclusions(effectiveFileExclusions());
+}
+
 void ExclusionListWidget::copyPathToClipboard(const QString& path) {
   if (path.isEmpty()) return;
   QApplication::clipboard()->setText(path);
@@ -468,6 +506,7 @@ void ExclusionListWidget::onItemDoubleClicked(QListWidgetItem* item) {
 void ExclusionListWidget::setDriveLetter(const QString& dl) {
   // 规范化交给 uwf::drive：trim + 大写 + 单个结尾冒号；非法输入（含空串）→ 空串。
   m_driveLetter = QString::fromStdString(drive::normalize(dl.toStdString()));
+  publishFileExclusions();
 }
 
 void ExclusionListWidget::setBaseline(const QStringList& current, const QStringList& next) {
@@ -484,6 +523,7 @@ void ExclusionListWidget::setBaseline(const QStringList& current, const QStringL
   m_added.clear();
   m_removed.clear();
   rebuild();
+  publishFileExclusions();
   emit pendingChanged();
 }
 
@@ -503,6 +543,7 @@ void ExclusionListWidget::resetPending() {
   m_persistDomainSecretKey.pendingNext.reset();
   m_persistTSCAL.pendingNext.reset();
   rebuild();
+  publishFileExclusions();
   emit pendingChanged();
 }
 
@@ -585,6 +626,13 @@ void ExclusionListWidget::addPendingEntry(const QString& raw) {
       dialogs::warning(this, I18n::tr("Cannot add this exclusion"), reason);
       return;
     }
+    if (m_conflicts) {
+      if (const auto conflict = m_conflicts->conflictingStagedPath(absoluteFilePath(p))) {
+        dialogs::warning(this, I18n::tr("Cannot add this exclusion"),
+                         I18n::tr("This path overlaps a file staging entry. Remove the staged path before adding the exclusion:\n%1").arg(*conflict));
+        return;
+      }
+    }
   } else {
     // Kind::Registry：先归一成长写（HKEY_*），保证存储 / 展示 / 去重口径统一；
     // 再做 UWF 文档明确禁止排除项的拦截。
@@ -602,6 +650,7 @@ void ExclusionListWidget::addPendingEntry(const QString& raw) {
     m_added.insert(p);
   }
   rebuild();
+  publishFileExclusions();
   emit pendingChanged();
 }
 
@@ -616,6 +665,9 @@ ExclusionListWidget::ImportOutcome ExclusionListWidget::importAdd(const QString&
     }
     if (!forbidExclusionReason(p, m_driveLetter).isEmpty()) {
       return ImportOutcome::RejectedForbidden;
+    }
+    if (m_conflicts && m_conflicts->conflictingStagedPath(absoluteFilePath(p))) {
+      return ImportOutcome::RejectedConflict;
     }
   } else {
     // Kind::Registry：归一成长写后再校验（与 addPendingEntry 同口径）。
@@ -637,6 +689,7 @@ ExclusionListWidget::ImportOutcome ExclusionListWidget::importAdd(const QString&
   }
   if (!changed) return ImportOutcome::NoOp;
   rebuild();
+  publishFileExclusions();
   emit pendingChanged();
   return ImportOutcome::Applied;
 }
@@ -662,6 +715,7 @@ ExclusionListWidget::ImportOutcome ExclusionListWidget::importRemove(const QStri
   }
   if (!changed) return ImportOutcome::NoOp;
   rebuild();
+  publishFileExclusions();
   emit pendingChanged();
   return ImportOutcome::Applied;
 }
@@ -686,6 +740,7 @@ void ExclusionListWidget::onRemove() {
       m_removed.insert(text);
   }
   rebuild();
+  publishFileExclusions();
   emit pendingChanged();
 }
 
@@ -810,8 +865,14 @@ void ExclusionListWidget::rebuild() {
       const QString full = entryFullPath(item);
       if (m_kind == Kind::File)
         tip += (fileEntryIsDir(entry) ? I18n::tr("Folder: %1") : I18n::tr("File: %1")).arg(full) + '\n';
-      else
+      else {
         tip += I18n::tr("Registry: %1").arg(full) + '\n';
+        if (isFileStagingRegistryRoot(full)) {
+          tip +=
+              I18n::tr("Required by UWF for File staging: UWF Manager maintains this exclusion so the staged-path list persists across protected sessions.") +
+              '\n';
+        }
+      }
     }
     // 头部（类型 + 路径 / 默认说明）与下面的会话状态之间空一行，做视觉分组。
     tip += '\n';

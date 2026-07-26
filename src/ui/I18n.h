@@ -53,6 +53,7 @@ class I18n {
 
   static I18n& instance();
   [[nodiscard]] static QString applicationTitle();
+  [[nodiscard]] static QString enhancedModeServiceDescription();
   [[nodiscard]] Lang lang() const { return m_lang; }
   void setLang(Lang l);
 

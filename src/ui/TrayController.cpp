@@ -65,7 +65,8 @@ QIcon makeAlertIcon() {
 
 }  // namespace
 
-TrayController::TrayController(QWidget* ownerWindow) : QObject(ownerWindow), m_iconNormal(QStringLiteral(":/icons/app.svg")), m_iconAlert(makeAlertIcon()) {
+TrayController::TrayController(QWidget* ownerWindow, QObject* parent)
+    : QObject(parent), m_iconNormal(QStringLiteral(":/icons/app.svg")), m_iconAlert(makeAlertIcon()) {
   if (!QSystemTrayIcon::isSystemTrayAvailable()) {
     UWF_LOG_W("tray") << "system tray unavailable: action=tray-disabled";
     return;

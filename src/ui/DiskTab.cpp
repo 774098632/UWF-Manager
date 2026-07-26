@@ -29,6 +29,7 @@
 #include "../util/ByteFormat.h"
 #include "Dialogs.h"
 #include "ExclusionListWidget.h"
+#include "FileStagingWidget.h"
 #include "I18n.h"
 #include "OverlayFilesDialog.h"
 #include "RegistryPickerDialog.h"
@@ -117,9 +118,17 @@ QString renderDiskHeading(const core::DiskInfo& d) {
 
 }  // namespace
 
-DiskTab::DiskTab(const core::DiskInfo& disk, bool showRegistry, QWidget* parent) : DiskTab(disk, showRegistry, dialogs::systemFileDialogs(), parent) {}
+DiskTab::DiskTab(const core::DiskInfo& disk, bool showRegistry, QWidget* parent) : DiskTab(disk, showRegistry, dialogs::systemFileDialogs(), nullptr, parent) {}
 
 DiskTab::DiskTab(const core::DiskInfo& disk, bool showRegistry, dialogs::FileDialogProvider& fileDialogs, QWidget* parent)
+    : DiskTab(disk, showRegistry, fileDialogs, nullptr, parent) {}
+
+DiskTab::DiskTab(const core::DiskInfo& disk, bool showRegistry, dialogs::FileDialogProvider& fileDialogs, app::FileStagingStore& fileStagingStore,
+                 QWidget* parent)
+    : DiskTab(disk, showRegistry, fileDialogs, &fileStagingStore, parent) {}
+
+DiskTab::DiskTab(const core::DiskInfo& disk, bool showRegistry, dialogs::FileDialogProvider& fileDialogs, app::FileStagingStore* fileStagingStore,
+                 QWidget* parent)
     : QWidget(parent), m_disk(disk), m_fileDialogs(fileDialogs) {
   auto* layout = new QVBoxLayout(this);
   // 顶部留白走 QTabWidget#innerTabs::pane 的 padding 即可，这里再叠 16px
@@ -209,7 +218,7 @@ DiskTab::DiskTab(const core::DiskInfo& disk, bool showRegistry, dialogs::FileDia
   m_infoTabs->setObjectName("innerTabs");
   m_infoTabs->setDocumentMode(true);
   m_infoTabs->setMinimumHeight(120);
-  m_files = new ExclusionListWidget(ExclusionListWidget::Kind::File, m_fileDialogs, this);
+  m_files = new ExclusionListWidget(ExclusionListWidget::Kind::File, m_fileDialogs, m_filePathConflicts, this);
   m_files->setDriveLetter(QString::fromStdString(disk.driveLetter));
   const int fileIdx = m_infoTabs->addTab(m_files, tm.icon(":/icons/file.svg"), I18n::tr("File exclusions"));
   m_infoTabs->setTabToolTip(fileIdx, I18n::tr("Files and folders on this volume excluded from UWF protection. Double-click an entry to copy its path."));
@@ -225,12 +234,22 @@ DiskTab::DiskTab(const core::DiskInfo& disk, bool showRegistry, dialogs::FileDia
                  "shared across all volumes and shown only once in the disk tabs. Double-click an entry to copy its path."));
   }
 
+  if (fileStagingStore && core::supportsFileOverlayOperations(m_disk.support)) {
+    m_fileStaging = new FileStagingWidget(QString::fromStdString(disk.driveLetter), *fileStagingStore, m_fileDialogs, m_filePathConflicts, this);
+    const int stagingIndex = m_infoTabs->addTab(m_fileStaging, tm.icon(":/icons/commit.svg"), I18n::tr("File staging"));
+    m_infoTabs->setTabToolTip(
+        stagingIndex,
+        I18n::tr("Files and folders in this list are committed automatically before safe shutdown or restart. Folders are processed recursively. While the "
+                 "list contains data, UWF Manager excludes HKLM\\SOFTWARE\\HsingYun\\UWF Manager so the list persists across protected sessions."));
+  }
+
   layout->addWidget(m_infoTabs, 1);
 
   connect(m_files, &ExclusionListWidget::pendingChanged, this, &DiskTab::pendingChanged);
   connect(m_status, &StatusPanel::pendingChanged, this, &DiskTab::pendingChanged);
   const auto onCopied = [this](const QString& hint) { emit statusHint(hint, 3000); };
   connect(m_files, &ExclusionListWidget::copiedToClipboard, this, onCopied);
+  if (m_fileStaging) connect(m_fileStaging, &FileStagingWidget::copiedToClipboard, this, onCopied);
   // 文件列表右键菜单的"提交改动"项 → 直接转发到 DiskTab::commitFileRequested
   // 信号，最终由 MainWindow.commitFilePath 处理（含文件/目录递归判断）。
   connect(m_files, &ExclusionListWidget::commitFileRequested, this, &DiskTab::commitFileRequested);
@@ -280,6 +299,10 @@ void DiskTab::refreshThemedIcons() {
     if (m_regs) {
       const int idx = m_infoTabs->indexOf(m_regs);
       if (idx >= 0) m_infoTabs->setTabIcon(idx, tm.icon(":/icons/registry.svg"));
+    }
+    if (m_fileStaging) {
+      const int idx = m_infoTabs->indexOf(m_fileStaging);
+      if (idx >= 0) m_infoTabs->setTabIcon(idx, tm.icon(":/icons/commit.svg"));
     }
   }
   // heading 用了 inline 颜色，重新生成一遍 RichText。
@@ -335,10 +358,29 @@ void DiskTab::onCommitRegistryDelete() {
   emit commitRegistryDeletionRequested(target->key, target->valueName);
 }
 
-int DiskTab::activeInfoTabIndex() const { return m_infoTabs ? m_infoTabs->currentIndex() : 0; }
+DiskTab::InfoPage DiskTab::activeInfoPage() const {
+  if (!m_infoTabs) return InfoPage::FileExclusions;
+  const QWidget* current = m_infoTabs->currentWidget();
+  if (current == m_regs) return InfoPage::RegistryExclusions;
+  if (current == m_fileStaging) return InfoPage::FileStaging;
+  return InfoPage::FileExclusions;
+}
 
-void DiskTab::setActiveInfoTabIndex(int index) {
-  if (m_infoTabs && index >= 0 && index < m_infoTabs->count()) m_infoTabs->setCurrentIndex(index);
+void DiskTab::setActiveInfoPage(const InfoPage page) {
+  if (!m_infoTabs) return;
+  QWidget* target = nullptr;
+  switch (page) {
+    case InfoPage::FileExclusions:
+      target = m_files;
+      break;
+    case InfoPage::RegistryExclusions:
+      target = m_regs;
+      break;
+    case InfoPage::FileStaging:
+      target = m_fileStaging;
+      break;
+  }
+  if (target) m_infoTabs->setCurrentWidget(target);
 }
 
 void DiskTab::markUnsupported() const {
@@ -457,6 +499,7 @@ void DiskTab::applySnapshot(const core::UwfSnapshot& snap) {
   // 不可写（UWF 不可用 / 未提权）时排除列表没有可落地的目标——整列设只读，
   // 禁掉添加 / 删除按钮；恢复可写后再放开（FS 受限卷的文件列表始终保持只读）。
   m_files->setReadOnly(!m_editable || !canManageExclusions());
+  if (m_fileStaging) m_fileStaging->setReadOnly(!m_editable);
 
   // 快照里可能补充 volumeName 信息，刷一下标题。
   if (nv && !nv->volumeName.empty() && m_disk.volumeName.empty()) {

@@ -27,11 +27,12 @@ UWF is the supported successor to the older Enhanced Write Filter (EWF) and File
 - Registry exclusion list (system volume)
 - DomainSecretKey / TSCAL persistence switches, shown and toggled inline in the registry exclusion list
 - Persist overlay contents back to disk or registry (files, directories, file deletions, registry keys)
+- File staging: persist a user-defined file/folder list in the registry and commit its current contents automatically before safe shutdown or restart
 - Read-only enumeration of overlay file entries
 - Import uwfmgr commands — paste or load a command script and stage each line as a pending change
 - System restart and shutdown
 - In-app log viewer
-- Stateless by design — the program keeps no state of its own: it writes no configuration files and no registry keys, and its internal log lives only in an in-memory ring buffer that is discarded when the process exits
+- Portable by default — file staging is the only feature that stores application state (its path list is kept in the registry); no configuration files are created, and the in-app log remains in memory and is discarded when the process exits
 
 ## Out of scope
 

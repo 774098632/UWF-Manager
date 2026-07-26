@@ -31,7 +31,10 @@ endif ()
 # 公共 API。
 qt_add_executable(UwfCoreBehaviorTests
         CoreBehaviorTests.cpp
+        ../src/app/ApplicationCommand.cpp
         ../src/app/StartupOptions.cpp
+        ../src/app/FileStagingCodec.cpp
+        ../src/app/FileStagingConflictPolicy.cpp
         ../src/util/ByteFormat.cpp
         ../src/util/DriveLetter.cpp
         ../src/util/PathMatch.cpp
@@ -77,6 +80,7 @@ add_test(NAME UwfWmiApiBehaviorTests COMMAND UwfWmiApiBehaviorTests)
 # 不可能调用关机/重启；排除测试也只改控件内 pending，不写 WMI 或注册表。
 qt_add_executable(UwfUiBehaviorTests
         UiBehaviorTests.cpp
+        ../src/app/FileStagingConflictPolicy.cpp
         ../src/util/ByteFormat.cpp
         ../src/util/DriveLetter.cpp
         ../src/core/RegistryExclusionPolicy.cpp
@@ -115,6 +119,13 @@ endif ()
 # 不执行真实 commit、关机、重启或 Shell 写操作。
 qt_add_executable(UwfApplicationUiBehaviorTests
         ApplicationUiBehaviorTests.cpp
+        ../src/app/ApplicationCommand.cpp
+        ../src/app/FileStagingCodec.cpp
+        ../src/app/FileStagingConflictPolicy.cpp
+        ../src/app/FileStagingStore.cpp
+        ../src/service/EnhancedModeAgent.cpp
+        ../src/service/EnhancedModeService.h
+        ../src/service/EnhancedModeServiceControl.cpp
         ../src/util/ByteFormat.cpp
         ../src/util/DriveLetter.cpp
         ../src/util/PathMatch.cpp
@@ -127,6 +138,7 @@ qt_add_executable(UwfApplicationUiBehaviorTests
         ../src/ui/Dialogs.cpp
         ../src/ui/DiskTab.cpp
         ../src/ui/ExclusionListWidget.cpp
+        ../src/ui/FileStagingWidget.cpp
         ../src/ui/GlobalStatusPanel.cpp
         ../src/ui/ImportApplier.cpp
         ../src/ui/ImportDialog.cpp
@@ -147,6 +159,9 @@ qt_add_executable(UwfApplicationUiBehaviorTests
         ../src/ui/UiUtil.cpp
         ../src/ui/CenteredTextStyle.cpp
         ../src/ui/CommitDispatcher.cpp
+        ../src/ui/EnhancedModeDialog.cpp
+        ../src/ui/FileStagingCoordinator.cpp
+        ../src/ui/FileStagingPresentation.cpp
         ../src/ui/HoverHintController.cpp
         ../src/ui/OverlayHubFactory.cpp
         ../src/ui/OverlayPresentationController.cpp
@@ -156,6 +171,10 @@ qt_add_executable(UwfApplicationUiBehaviorTests
         ../src/ui/WindowChromeController.cpp
         ../src/uwf/SystemCheck.cpp
         ../src/uwf/UwfSnapshot.cpp
+        ../src/uwf/FileStagingCommitter.cpp
+        ../src/uwf/FileStagingTask.cpp
+        ../src/uwf/FileStagingHandoff.cpp
+        ../src/uwf/RegistryTreeCommitter.cpp
         ../src/uwf/api/UwfOverlay.cpp
         ../src/uwf/api/UwfFilter.cpp
         ../src/uwf/api/UwfOverlayConfig.cpp
@@ -168,7 +187,8 @@ qt_add_executable(UwfApplicationUiBehaviorTests
         ../src/uwf/wmi/WmiRowUtil.cpp
 )
 target_include_directories(UwfApplicationUiBehaviorTests PRIVATE "${PROJECT_SOURCE_DIR}/src" "${PROJECT_BINARY_DIR}/generated")
-target_link_libraries(UwfApplicationUiBehaviorTests PRIVATE UwfOverlayRuntime Qt6::Widgets Qt6::Svg Qt6::Test advapi32 dwmapi ole32 shell32 shcore user32 wbemuuid)
+target_link_libraries(UwfApplicationUiBehaviorTests PRIVATE UwfOverlayRuntime Qt6::Widgets Qt6::Svg Qt6::Test advapi32 dwmapi ole32 shell32 shcore user32
+        userenv wbemuuid wtsapi32)
 uwf_configure_cpp_target(UwfApplicationUiBehaviorTests)
 uwf_add_test_resources(UwfApplicationUiBehaviorTests)
 qt_add_translations(UwfApplicationUiBehaviorTests
@@ -222,6 +242,7 @@ if (WIN32)
     # 探测和单实例命名管道。该目标不执行 UWF 写入、注册表写入或电源操作。
     qt_add_executable(UwfWindowsPlatformIntegrationTests
             WindowsPlatformIntegrationTests.cpp
+            ../src/app/ApplicationCommand.cpp
             ../src/app/SecureSingleInstance.cpp
             ../src/core/UwfModel.cpp
             ../src/ui/SystemInfoProvider.cpp

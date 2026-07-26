@@ -25,6 +25,9 @@
 #include <utility>
 #include <vector>
 
+#include "app/ApplicationCommand.h"
+#include "app/FileStagingConflictPolicy.h"
+#include "app/FileStagingStore.h"
 #include "app/StartupOptions.h"
 #include "core/RegistryExclusionPolicy.h"
 #include "core/UwfModel.h"
@@ -56,7 +59,10 @@ class CoreBehaviorTests final : public QObject {
   Q_OBJECT
 
  private slots:
-  void startupOptionsRecognizeOnlyTheExactQuietArgument();
+  void startupOptionsClassifyEveryExclusiveMode();
+  void applicationCommandProtocolRejectsTruncationAndCorruption();
+  void fileStagingRegistryCodecPreservesKindsAndRejectsCorruption();
+  void fileStagingConflictsRespectCaseAndPathSegments();
   void stringAndDriveNormalization();
   void asciiAndDrivePropertiesCoverTheInputSpace();
   void byteFormattingUsesStableUnitBoundaries();
@@ -82,20 +88,186 @@ class CoreBehaviorTests final : public QObject {
   void registryProtocolNamesAndRootsAreStable();
 };
 
-void CoreBehaviorTests::startupOptionsRecognizeOnlyTheExactQuietArgument() {
+void CoreBehaviorTests::startupOptionsClassifyEveryExclusiveMode() {
   using uwf::app::StartupMode;
 
   QCOMPARE(uwf::app::parseStartupOptions({}).mode, StartupMode::Interactive);
   QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe")}).mode, StartupMode::Interactive);
   QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--quiet")}).mode, StartupMode::Quiet);
-  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--other"), QStringLiteral("--quiet")}).mode, StartupMode::Quiet);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--commit-stage")}).mode, StartupMode::CommitStage);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--service")}).mode, StartupMode::Service);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--install")}).mode, StartupMode::InstallService);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--uninstall")}).mode, StartupMode::UninstallService);
 
-  for (const QString& unsupported : {QStringLiteral("--quite"), QStringLiteral("--Quiet"), QStringLiteral("--quiet=true"), QStringLiteral(" --quiet")}) {
-    QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), unsupported}).mode, StartupMode::Interactive);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--quiet")}).initialCommand(),
+           uwf::app::ApplicationCommandKind::EnsureRunning);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--commit-stage")}).initialCommand(),
+           uwf::app::ApplicationCommandKind::CommitStage);
+  QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe")}).initialCommand(), uwf::app::ApplicationCommandKind::Activate);
+  for (const StartupMode mode : {StartupMode::Service, StartupMode::InstallService, StartupMode::UninstallService}) {
+    QVERIFY_THROWS_EXCEPTION(uwf::app::StartupOptionsError, static_cast<void>(uwf::app::StartupOptions{mode}.initialCommand()));
   }
+
+  for (const QString& unsupported :
+       {QStringLiteral("--quite"), QStringLiteral("--Quiet"), QStringLiteral("--quiet=true"), QStringLiteral(" --quiet"), QStringLiteral("--other")}) {
+    QVERIFY_THROWS_EXCEPTION(uwf::app::StartupOptionsError, static_cast<void>(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), unsupported})));
+  }
+  QVERIFY_THROWS_EXCEPTION(
+      uwf::app::StartupOptionsError,
+      static_cast<void>(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--quiet"), QStringLiteral("--commit-stage")})));
+  QVERIFY_THROWS_EXCEPTION(
+      uwf::app::StartupOptionsError,
+      static_cast<void>(uwf::app::parseStartupOptions({QStringLiteral("UWF.exe"), QStringLiteral("--service"), QStringLiteral("--service")})));
 
   // 首项是可执行文件名，不得被当作用户参数。
   QCOMPARE(uwf::app::parseStartupOptions({QStringLiteral("--quiet")}).mode, StartupMode::Interactive);
+}
+
+void CoreBehaviorTests::applicationCommandProtocolRejectsTruncationAndCorruption() {
+  using namespace uwf::app;
+  const ApplicationCommandRequest request{ApplicationCommandKind::CommitStage, std::numeric_limits<std::uint64_t>::max()};
+  const QByteArray requestBytes = encodeCommandRequest(request);
+  QCOMPARE(decodeCommandRequest(requestBytes), std::optional<ApplicationCommandRequest>{request});
+  QCOMPARE(applicationCommandMessageKind(requestBytes), ApplicationCommandMessageKind::Request);
+
+  for (qsizetype length = 0; length < requestBytes.size(); ++length) {
+    QVERIFY(!decodeCommandRequest(requestBytes.left(length)).has_value());
+  }
+  QByteArray corrupt = requestBytes;
+  corrupt[0] = 'X';
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
+  corrupt = requestBytes;
+  corrupt[4] = '\2';
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
+  corrupt = requestBytes;
+  corrupt[6] = '\0';
+  corrupt[7] = '\0';
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
+  corrupt = requestBytes;
+  corrupt[20] = '\1';
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
+  corrupt = requestBytes;
+  corrupt[26] = '\1';
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
+  corrupt = requestBytes;
+  corrupt.append('x');
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandRequest(corrupt)));
+
+  const ApplicationCommandProgress progress{123, 456};
+  const QByteArray progressBytes = encodeCommandProgress(request.requestId, progress);
+  const std::optional expectedProgress{std::pair{request.requestId, progress}};
+  QCOMPARE(decodeCommandProgress(progressBytes), expectedProgress);
+  QCOMPARE(applicationCommandMessageKind(progressBytes), ApplicationCommandMessageKind::Progress);
+  const ApplicationCommandProgress scanProgress{123, 0};
+  const std::optional expectedScanProgress{std::pair{request.requestId, scanProgress}};
+  QCOMPARE(decodeCommandProgress(encodeCommandProgress(request.requestId, scanProgress)), expectedScanProgress);
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandProgress(encodeCommandProgress(request.requestId, {457, 456}))));
+
+  const ApplicationCommandResult result{ApplicationCommandOutcome::CompletedWithFailures, 10, 7, 2, 1, 3, QStringLiteral("路径失败")};
+  const QByteArray resultBytes = encodeCommandResult(request.requestId, result);
+  const auto decoded = decodeCommandResult(resultBytes);
+  QVERIFY(decoded.has_value());
+  QCOMPARE(decoded->first, request.requestId);
+  QCOMPARE(decoded->second.outcome, result.outcome);
+  QCOMPARE(decoded->second.discoveredFiles, result.discoveredFiles);
+  QCOMPARE(decoded->second.committedFiles, result.committedFiles);
+  QCOMPARE(decoded->second.skippedFiles, result.skippedFiles);
+  QCOMPARE(decoded->second.skippedEntries, result.skippedEntries);
+  QCOMPARE(decoded->second.failedFiles, result.failedFiles);
+  QCOMPARE(decoded->second.detail, result.detail);
+  QCOMPARE(applicationCommandMessageKind(resultBytes), ApplicationCommandMessageKind::Result);
+
+  const ApplicationCommandResult approvedContinuation{ApplicationCommandOutcome::ContinuationApproved, 4, 1, 0, 0, 1, QStringLiteral("用户已确认继续关机")};
+  const auto decodedContinuation = decodeCommandResult(encodeCommandResult(request.requestId, approvedContinuation));
+  QVERIFY(decodedContinuation.has_value());
+  QCOMPARE(decodedContinuation->second.outcome, ApplicationCommandOutcome::ContinuationApproved);
+  QVERIFY(!decodedContinuation->second.completed());
+  QVERIFY(decodedContinuation->second.authorizesPreshutdownRelease());
+
+  const auto infrastructureRelease = ApplicationCommandResult::releasedPreshutdown(QStringLiteral("agent unavailable"));
+  const auto decodedInfrastructureRelease = decodeCommandResult(encodeCommandResult(request.requestId, infrastructureRelease));
+  QVERIFY(decodedInfrastructureRelease.has_value());
+  QCOMPARE(decodedInfrastructureRelease->second.outcome, ApplicationCommandOutcome::PreshutdownReleased);
+  QVERIFY(!decodedInfrastructureRelease->second.completed());
+  QVERIFY(decodedInfrastructureRelease->second.authorizesPreshutdownRelease());
+  QCOMPARE(decodedInfrastructureRelease->second.failedFiles, std::size_t{1});
+
+  corrupt = resultBytes;
+  corrupt[corrupt.size() - 1] = static_cast<char>(0xFF);
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandResult(corrupt)));
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError,
+                           static_cast<void>(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::Succeeded, 1, 1, 0, 0, 1, {}})));
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError,
+                           static_cast<void>(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::CompletedWithFailures, 1, 0, 1, 0, 0, {}})));
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError,
+                           static_cast<void>(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::Succeeded, 1, 1, 1, 0, 0, {}})));
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError,
+                           static_cast<void>(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::ContinuationApproved, 1, 0, 1, 0, 0, {}})));
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError,
+                           static_cast<void>(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::PreshutdownReleased, 0, 0, 0, 0, 0, {}})));
+
+  corrupt = resultBytes;
+  corrupt[24] = static_cast<char>(ApplicationCommandOutcome::Succeeded);
+  corrupt[25] = '\0';
+  QVERIFY_THROWS_EXCEPTION(ApplicationCommandProtocolError, static_cast<void>(decodeCommandResult(corrupt)));
+
+  const QString oversizedDetail(70 * 1024, QChar(u'界'));
+  const auto oversized =
+      decodeCommandResult(encodeCommandResult(request.requestId, {ApplicationCommandOutcome::CompletedWithFailures, 1, 0, 0, 0, 1, oversizedDetail}));
+  QVERIFY(oversized.has_value());
+  QCOMPARE(oversized->second.outcome, ApplicationCommandOutcome::CompletedWithFailures);
+  QCOMPARE(oversized->second.failedFiles, std::size_t{1});
+  QVERIFY(oversized->second.detail.toUtf8().size() <= 64 * 1024 - 48);
+  QVERIFY(oversized->second.detail.endsWith(QStringLiteral("\n…")));
+}
+
+void CoreBehaviorTests::fileStagingRegistryCodecPreservesKindsAndRejectsCorruption() {
+  const QList<uwf::app::FileStagingEntry> entries{{uwf::app::FileStagingKind::File, QStringLiteral("C:\\数据|state.bin")},
+                                                  {uwf::app::FileStagingKind::Directory, QStringLiteral("D:\\Vendor\\Cache")}};
+  const auto encoded = uwf::app::encodeFileStagingEntries(entries);
+  QCOMPARE(encoded, std::vector<std::string>({"F|C:\\数据|state.bin", "D|D:\\Vendor\\Cache"}));
+  QCOMPARE(uwf::app::decodeFileStagingEntries(encoded), entries);
+  QVERIFY(uwf::app::decodeFileStagingEntries({}).isEmpty());
+
+  QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(uwf::app::decodeFileStagingEntries({"X|C:\\unknown"})));
+  QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(uwf::app::decodeFileStagingEntries({"F|"})));
+  QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(uwf::app::decodeFileStagingEntries({"F|C:relative"})));
+  QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(uwf::app::decodeFileStagingEntries({R"(D|\\server\share\cache)"})));
+  QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(uwf::app::decodeFileStagingEntries({R"(F|\\.\C:\device)"})));
+  QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(uwf::app::decodeFileStagingEntries({R"(F|\\?\C:\extended)"})));
+  std::string encodedNul = "F|C:\\state";
+  encodedNul.push_back('\0');
+  encodedNul += "hidden";
+  QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(uwf::app::decodeFileStagingEntries({encodedNul})));
+  QVERIFY_THROWS_EXCEPTION(std::invalid_argument, static_cast<void>(uwf::app::encodeFileStagingEntries({{uwf::app::FileStagingKind::File, {}}})));
+  QVERIFY_THROWS_EXCEPTION(std::invalid_argument,
+                           static_cast<void>(uwf::app::encodeFileStagingEntries({{uwf::app::FileStagingKind::File, QStringLiteral("C:relative")}})));
+  QString nulPath = QStringLiteral("C:\\state");
+  nulPath.append(QChar(u'\0'));
+  const QList<uwf::app::FileStagingEntry> nulEntry{{uwf::app::FileStagingKind::File, nulPath}};
+  QVERIFY_THROWS_EXCEPTION(std::invalid_argument, static_cast<void>(uwf::app::encodeFileStagingEntries(nulEntry)));
+  const QList<uwf::app::FileStagingEntry> invalidKind{{static_cast<uwf::app::FileStagingKind>(99), QStringLiteral("C:\\state")}};
+  QVERIFY_THROWS_EXCEPTION(std::invalid_argument, static_cast<void>(uwf::app::encodeFileStagingEntries(invalidKind)));
+  QVERIFY_THROWS_EXCEPTION(std::system_error, static_cast<void>(uwf::app::decodeFileStagingEntries({std::string("F|\xC3", 3)})));
+}
+
+void CoreBehaviorTests::fileStagingConflictsRespectCaseAndPathSegments() {
+  uwf::app::FileStagingConflictPolicy policy;
+  policy.setFileExclusions(
+      {QStringLiteral("C:/Program Data/Vendor/"), QStringLiteral("c:\\program data\\vendor"), QStringLiteral("D:\\Shared")});
+  policy.setStagedEntries({{uwf::app::FileStagingKind::File, QStringLiteral("C:\\Cache\\state.bin")},
+                           {uwf::app::FileStagingKind::Directory, QStringLiteral("D:/Work/Tree")}});
+
+  const auto vendorConflict = policy.conflictingExclusion(QStringLiteral("c:\\PROGRAM DATA\\Vendor\\state.db"));
+  QVERIFY(vendorConflict.has_value());
+  QCOMPARE(vendorConflict->compare(QStringLiteral("C:\\Program Data\\Vendor"), Qt::CaseInsensitive), 0);
+  QCOMPARE(policy.conflictingExclusion(QStringLiteral("D:\\Shared")), std::optional{QStringLiteral("D:\\Shared")});
+  QVERIFY(!policy.conflictingExclusion(QStringLiteral("C:\\Program Database\\Vendor")).has_value());
+  QVERIFY(!policy.conflictingExclusion(QStringLiteral("E:\\Shared")).has_value());
+
+  QCOMPARE(policy.conflictingStagedPath(QStringLiteral("C:\\Cache")), std::optional{QStringLiteral("C:\\Cache\\state.bin")});
+  QCOMPARE(policy.conflictingStagedPath(QStringLiteral("d:\\work\\tree\\child")), std::optional{QStringLiteral("D:\\Work\\Tree")});
+  QVERIFY(!policy.conflictingStagedPath(QStringLiteral("C:\\Caches")).has_value());
 }
 
 struct RefCountedProbe {

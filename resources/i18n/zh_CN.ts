@@ -179,6 +179,84 @@
         <source>Registry exclusions are global: they are governed by the global UWF filter switch, not by this volume's protection state. The list is shared across all volumes and shown only once in the disk tabs. Double-click an entry to copy its path.</source>
         <translation>注册表排除是全局的：由全局 UWF 筛选器开关控制，与本卷的保护状态无关。该列表跨所有卷共享，并且只会在磁盘标签页中显示一次。双击条目可复制路径。</translation>
     </message>
+    <message><source>File staging</source><translation>文件暂存</translation></message>
+    <message>
+        <source>Files and folders in this list are committed automatically before safe shutdown or restart. Folders are processed recursively. While the list contains data, UWF Manager excludes HKLM\SOFTWARE\HsingYun\UWF Manager so the list persists across protected sessions.</source>
+        <translation>列表中的文件和文件夹会在安全关机或重启前自动提交，文件夹将递归处理。列表中存在数据时，UWF Manager 会排除 HKLM\SOFTWARE\HsingYun\UWF Manager，以确保该列表在受保护会话之间保持有效。</translation>
+    </message>
+    <message><source>Search staged paths…</source><translation>搜索暂存路径…</translation></message>
+    <message><source>Add files or a folder to the automatic commit list.</source><translation>将文件或文件夹加入自动提交列表。</translation></message>
+    <message>
+        <source>Select one or more files to commit automatically before safe shutdown or restart.</source>
+        <translation>选择一个或多个文件，在安全关机或重启前自动提交。</translation>
+    </message>
+    <message>
+        <source>Select a folder whose files will be committed recursively before safe shutdown or restart.</source>
+        <translation>选择一个文件夹，在安全关机或重启前递归提交其中的文件。</translation>
+    </message>
+    <message><source>Remove the selected paths from automatic commit immediately.</source><translation>立即从自动提交列表中移除所选路径。</translation></message>
+    <message><source>Select files for automatic commit</source><translation>选择需要自动提交的文件</translation></message>
+    <message><source>Select a folder for automatic recursive commit</source><translation>选择需要自动递归提交的文件夹</translation></message>
+    <message><source>Cannot stage this path</source><translation>无法暂存此路径</translation></message>
+    <message>
+        <source>This path overlaps a UWF file exclusion. Remove the exclusion before adding the staged path:
+%1</source>
+        <translation>该路径与 UWF 文件排除项存在重叠。请先移除以下排除项，再添加暂存路径：
+%1</translation>
+    </message>
+    <message>
+        <source>This path overlaps a file staging entry. Remove the staged path before adding the exclusion:
+%1</source>
+        <translation>该路径与文件暂存项存在重叠。请先移除以下暂存路径，再添加排除项：
+%1</translation>
+    </message>
+    <message><source>The path overlaps an existing file staging entry</source><translation>路径与现有文件暂存项存在重叠</translation></message>
+    <message>
+        <source>The selected path does not exist or is not the expected file type:
+%1</source>
+        <translation>所选路径不存在，或其类型与选择操作不符：
+%1</translation>
+    </message>
+    <message>
+        <source>The selected path could not be inspected:
+%1</source>
+        <translation>无法检查所选路径：
+%1</translation>
+    </message>
+    <message>
+        <source>Reparse points cannot be added to automatic file staging:
+%1</source>
+        <translation>不能将重解析点加入文件暂存：
+%1</translation>
+    </message>
+    <message>
+        <source>The path has no drive letter and cannot be committed by UWF:
+%1</source>
+        <translation>此路径没有盘符，UWF 无法提交：
+%1</translation>
+    </message>
+    <message>
+        <source>The selected path is on volume %1. Add it from that volume's File staging tab.</source>
+        <translation>所选路径位于 %1 卷，请在该卷的“文件暂存”页中添加。</translation>
+    </message>
+    <message>
+        <source>A volume root cannot be staged because it would recursively commit the entire volume.</source>
+        <translation>不能暂存卷根目录，否则会递归提交整个卷。</translation>
+    </message>
+    <message><source>File staging could not be saved</source><translation>无法保存文件暂存列表</translation></message>
+    <message>
+        <source>The file staging state was reloaded after the update could not be completed:
+%1</source>
+        <translation>更新未能完成，已重新加载文件暂存的实际状态：
+%1</translation>
+    </message>
+    <message><source>File staging is unavailable: %1</source><translation>文件暂存不可用：%1</translation></message>
+    <message><source>Committed automatically before safe shutdown or restart.</source><translation>将在安全关机或重启前自动提交。</translation></message>
+    <message><source>%1 staged entries · %2 files · %3 folders</source><translation>%1 个暂存项 · %2 个文件 · %3 个文件夹</translation></message>
+    <message>
+        <source>Required by UWF for File staging: UWF Manager maintains this exclusion so the staged-path list persists across protected sessions.</source>
+        <translation>UWF 文件暂存功能需要此项：UWF Manager 会维护该排除项，确保暂存路径列表在受保护会话之间保持有效。</translation>
+    </message>
     <message>
         <source>The UWF filter is currently disabled; no overlay changes have been accumulated, so there is nothing to commit.</source>
         <translation>UWF 筛选器当前已停用，覆盖层中不会累积修改，没有可提交的内容。</translation>
@@ -532,13 +610,10 @@ Canceled by user; %1 entries not processed.</source>
         <translation>有 %1 项待应用变更（尚未写入系统）</translation>
     </message>
     <message><source>No pending changes</source><translation>无待应用变更</translation></message>
+    <message><source> (Also manages global registry exclusions.)</source><translation>（同时管理全局注册表排除）</translation></message>
     <message>
-        <source> (System drive: also manages the global registry exclusion list here.)</source>
-        <translation>（系统盘，也在这里管理全局注册表排除）</translation>
-    </message>
-    <message>
-        <source>Switch to protection settings and file exclusions for volume %1.%2</source>
-        <translation>切换到卷 %1 的保护设置与文件排除列表。%2</translation>
+        <source>Switch to protection settings, file exclusions, and file staging for volume %1.%2</source>
+        <translation>切换到卷 %1 的保护设置、文件排除与文件暂存。%2</translation>
     </message>
     <message><source>UWF namespace is not available</source><translation>UWF 命名空间不可用</translation></message>
     <message><source>Refreshed · %1 volumes</source><translation>已刷新 · 共 %1 个卷</translation></message>
@@ -614,16 +689,63 @@ Canceled by user; %1 entries not processed.</source>
     <message><source>Confirm safe restart?</source><translation>确定要安全重启吗？</translation></message>
     <message><source>Shut down</source><translation>关机</translation></message>
     <message><source>Restart</source><translation>重启</translation></message>
+    <message><source>Continue shutdown</source><translation>仍然关机</translation></message>
+    <message><source>Continue restart</source><translation>仍然重启</translation></message>
     <message><source>The system will shut down safely through UWF.</source><translation>系统将通过 UWF 安全关机。</translation></message>
     <message><source>The system will restart safely through UWF.</source><translation>系统将通过 UWF 安全重启。</translation></message>
     <message><source>UWF protection</source><translation>UWF 保护</translation></message>
     <message><source>This operation remains available even if the UWF overlay is full.</source><translation>即使 UWF 覆盖层已满，仍可安全执行此操作。</translation></message>
+    <message><source>Calculating files for automatic commit…</source><translation>正在计算需要自动提交的文件…</translation></message>
+    <message>
+        <source>%1 file(s) will be committed automatically before this operation. Files outside currently protected volumes are skipped.</source>
+        <translation>执行此操作前将自动提交 %1 个文件；当前未受 UWF 保护的卷将被跳过。</translation>
+    </message>
+    <message><source>Committing staged files</source><translation>正在提交暂存文件</translation></message>
+    <message><source>The power action will continue after file staging completes.</source><translation>文件暂存完成后，将继续执行电源操作。</translation></message>
+    <message><source>Processed %1 of %2 file(s).</source><translation>已处理 %1 / %2 个文件。</translation></message>
+    <message><source>Automatic file staging did not complete</source><translation>文件暂存未能全部提交</translation></message>
+    <message><source>Review the operation details before deciding whether to continue.</source><translation>请查看操作详情，再决定是否仍要继续。</translation></message>
+    <message><source>Operation details</source><translation>操作详情</translation></message>
+    <message><source>No additional error details were provided.</source><translation>未提供更多错误详情。</translation></message>
+    <message><source>Some changes may not be preserved</source><translation>部分更改可能无法保留</translation></message>
+    <message><source>If you continue, the system will shut down without the files that could not be committed.</source><translation>如果仍然继续，系统将关机，未能提交的文件更改不会被保留。</translation></message>
+    <message><source>If you continue, the system will restart without the files that could not be committed.</source><translation>如果仍然继续，系统将重启，未能提交的文件更改不会被保留。</translation></message>
+    <message>
+        <source>Automatic file staging stopped unexpectedly:
+%1</source>
+        <translation>文件暂存意外中止：
+%1</translation>
+    </message>
+    <message><source>Automatic file staging stopped because of an unknown error.</source><translation>文件暂存因未知错误中止。</translation></message>
     <message><source>Uncommitted changes will be lost</source><translation>尚未提交的更改将会丢失</translation></message>
     <message><source>Before continuing, save your work and commit any changes that you want to keep permanently.</source><translation>继续前，请保存当前工作，并通过 UWF 提交需要永久保留的更改。</translation></message>
     <message><source>Safe shutdown failed</source><translation>安全关机失败</translation></message>
     <message><source>Shutdown failed: %1</source><translation>关机失败：%1</translation></message>
     <message><source>Safe restart failed</source><translation>安全重启失败</translation></message>
     <message><source>Restart failed: %1</source><translation>重启失败：%1</translation></message>
+    <message>
+        <source>The file staging list could not be read:
+%1</source>
+        <translation>无法读取文件暂存列表：
+%1</translation>
+    </message>
+    <message><source>The file staging list could not be read because of an unknown error.</source><translation>读取文件暂存列表时发生未知错误。</translation></message>
+    <message><source>Discovered files: %1 · Committed: %2 · Skipped files: %3 · Skipped entries: %4 · Failed: %5</source><translation>发现文件：%1 · 已提交：%2 · 已跳过文件：%3 · 已跳过条目：%4 · 失败：%5</translation></message>
+    <message><source>File staging preparation</source><translation>文件暂存准备阶段</translation></message>
+    <message><source>Reparse points are not supported.</source><translation>不支持重解析点。</translation></message>
+    <message><source>Only absolute paths on local volumes can be staged.</source><translation>仅可暂存本地卷上的绝对路径。</translation></message>
+    <message><source>Only absolute paths on local volumes can be added to automatic file staging:
+%1</source><translation>仅可将本地卷上的绝对路径加入自动文件暂存：
+%1</translation></message>
+    <message><source>The staged path could not be inspected.</source><translation>无法检查暂存路径。</translation></message>
+    <message><source>The staged file now refers to a different path type.</source><translation>暂存文件当前已变为其他路径类型。</translation></message>
+    <message><source>The staged folder now refers to a different path type.</source><translation>暂存文件夹当前已变为其他路径类型。</translation></message>
+    <message><source>The staged folder could not be enumerated completely.</source><translation>无法完整枚举暂存文件夹。</translation></message>
+    <message><source>The path has no drive letter.</source><translation>路径没有盘符。</translation></message>
+    <message><source>A volume root cannot be processed recursively.</source><translation>不能递归处理卷根目录。</translation></message>
+    <message><source>The UWF provider rejected the commit.</source><translation>UWF 提供程序拒绝了提交请求。</translation></message>
+    <message><source>The commit failed with an unknown error.</source><translation>提交因未知错误失败。</translation></message>
+    <message><source>%1 additional failure(s) were written to the log.</source><translation>另有 %1 项失败已写入日志。</translation></message>
 
     <!-- commitFilePath -->
     <message><source>Commit failed</source><translation>提交失败</translation></message>
@@ -881,6 +1003,92 @@ Continue and discard them?</source><translation>还有 %1 个待应用变更尚�
     <message><source>UWF: Disabled</source><translation>UWF：已禁用</translation></message>
     <message><source>UWF status unavailable</source><translation>UWF 状态不可用</translation></message>
     <message><source>Used %1 MB / Total %2 MB</source><translation>已用 %1 MB / 总计 %2 MB</translation></message>
+
+    <!-- Enhanced mode -->
+    <message><source>Enhanced mode</source><translation>增强模式</translation></message>
+    <message><source>Coordinate automatic file staging with Windows shutdown and restart.</source><translation>将文件暂存自动提交与 Windows 关机、重启流程联动。</translation></message>
+    <message><source>Enhanced mode installs an automatically started LocalSystem service. It launches UWF Manager after Windows starts and attempts to commit changes to user-configured staged files before shutdown or restart, improving compatibility for applications that conflict with UWF.</source><translation>增强模式会安装一项以 LocalSystem 身份运行的自动启动服务。系统启动后，服务会启动 UWF 管理器；关机或重启前，会尝试提交用户预先配置的暂存文件的变更，以改善部分与 UWF 存在兼容性冲突的软件运行体验。</translation></message>
+    <message><source>System changes</source><translation>系统变更</translation></message>
+    <message><source>Creates the automatic service UWFManagerEnhanced and binds it to the current executable path</source><translation>创建自动启动服务 UWFManagerEnhanced，并将其绑定到当前可执行文件路径</translation></message>
+    <message><source>Writes and commits the service configuration under HKLM\SYSTEM\CurrentControlSet\Services\UWFManagerEnhanced</source><translation>在注册表 HKLM\SYSTEM\CurrentControlSet\Services\UWFManagerEnhanced 下写入服务配置，并提交</translation></message>
+    <message><source>Starts UWF Manager automatically after the next Windows startup; moving the executable can break automatic startup</source><translation>下次 Windows 启动时自动运行 UWF 管理器；移动当前可执行文件可能导致自启动失效</translation></message>
+    <message><source>Commits eligible staged files during normal Windows shutdown and restart</source><translation>在 Windows 正常关机或重启过程中，提交符合条件的暂存文件</translation></message>
+    <message><source>Registers a service in the system registry when enhanced mode is enabled, so the application no longer remains fully portable</source><translation>启用增强模式后会在系统注册表注册服务，打破纯绿色运行的约束，请知悉</translation></message>
+    <message><source>Enhanced mode status could not be read</source><translation>无法读取增强模式状态</translation></message>
+    <message><source>The enhanced mode status read failed because of an unknown error.</source><translation>读取增强模式状态时发生未知错误。</translation></message>
+    <message><source>The current service state could not be read:
+%1</source><translation>无法读取服务的当前状态：
+%1</translation></message>
+    <message><source>The current service state could not be read because of an unknown error.</source><translation>读取服务当前状态时发生未知错误。</translation></message>
+    <message><source>Status: Disabled</source><translation>状态：未启用</translation></message>
+    <message><source>Status: Enabled</source><translation>状态：已启用</translation></message>
+    <message><source>Status: Service stopped</source><translation>状态：服务未运行</translation></message>
+    <message><source>Status: Repair required</source><translation>状态：需要修复</translation></message>
+    <message><source>The service is not configured as an independent process.</source><translation>服务未配置为独立进程。</translation></message>
+    <message><source>The service is not configured for automatic startup.</source><translation>服务未配置为自动启动。</translation></message>
+    <message><source>The service is not configured to run as LocalSystem.</source><translation>服务未配置为以 LocalSystem 身份运行。</translation></message>
+    <message><source>The service is not running.</source><translation>服务当前未运行。</translation></message>
+    <message><source>The service executable path or startup arguments do not match this executable.</source><translation>服务配置的可执行文件路径或启动参数与当前程序不一致。</translation></message>
+    <message><source>The service preshutdown timeout is not configured correctly.</source><translation>服务的预关机超时配置不正确。</translation></message>
+    <message><source>The service does not declare the privileges required to start the UI agent.</source><translation>服务未声明启动 UI 代理所需的权限。</translation></message>
+    <message><source>The service has not accepted Windows preshutdown notifications.</source><translation>服务尚未接受 Windows 预关机通知。</translation></message>
+    <message><source>Enable enhanced mode</source><translation>启用增强模式</translation></message>
+    <message><source>Disable enhanced mode</source><translation>关闭增强模式</translation></message>
+    <message><source>Start service</source><translation>启动服务</translation></message>
+    <message><source>Repair enhanced mode</source><translation>修复增强模式</translation></message>
+    <message><source>Delete service</source><translation>删除服务</translation></message>
+    <message>
+        <source>Stop and delete the enhanced mode service, including any remaining service registry data.</source>
+        <translation>停止并删除增强模式服务，同时清理残留的服务注册表数据。</translation>
+    </message>
+    <message>
+        <source>The service is absent, but its service registry data remains.</source>
+        <translation>服务已不存在，但仍有服务注册表数据残留。</translation>
+    </message>
+    <message>
+        <source>Waiting for the UI agent to complete authentication.</source>
+        <translation>正在等待 UI 代理完成身份认证。</translation>
+    </message>
+    <message>
+        <source>The service is running, but no authenticated UI agent is connected.</source>
+        <translation>服务正在运行，但当前没有通过身份认证的 UI 代理连接。</translation>
+    </message>
+    <message>
+        <source>UWF Manager enhanced mode helper service</source>
+        <translation>UWF Manager 增强模式辅助服务</translation>
+    </message>
+    <message><source>The enhanced mode configuration was applied.</source><translation>增强模式配置已应用。</translation></message>
+    <message><source>The service configuration was applied, but UWF persistence reported:
+%1</source><translation>服务配置已应用，但 UWF 持久化操作报告了以下问题：
+%1</translation></message>
+    <message><source>The enhanced mode configuration failed:
+%1</source><translation>增强模式配置失败：
+%1</translation></message>
+    <message><source>The enhanced mode configuration failed because of an unknown error.</source><translation>增强模式配置因未知错误而失败。</translation></message>
+    <message>
+        <source>The enhanced mode service and its remaining configuration were deleted.</source>
+        <translation>增强模式服务及其残留配置已删除。</translation>
+    </message>
+    <message>
+        <source>The service deletion was requested, but residual cleanup reported:
+%1</source>
+        <translation>已请求删除服务，但残留清理报告了以下问题：
+%1</translation>
+    </message>
+    <message>
+        <source>The enhanced mode service could not be deleted:
+%1</source>
+        <translation>无法删除增强模式服务：
+%1</translation>
+    </message>
+    <message>
+        <source>The enhanced mode service could not be deleted because of an unknown error.</source>
+        <translation>删除增强模式服务时发生未知错误。</translation>
+    </message>
+    <message><source>File staging completed</source><translation>文件暂存提交完成</translation></message>
+    <message><source>File staging failed</source><translation>文件暂存提交失败</translation></message>
+    <message><source>All staged targets were processed.</source><translation>所有暂存目标均已处理。</translation></message>
+    <message><source>All staged targets were processed; one or more operations failed.</source><translation>所有暂存目标均已处理，但部分操作失败。</translation></message>
 
     <!-- Overlay floating window -->
     <message><source>Show main window</source><translation>显示主界面</translation></message>

@@ -21,10 +21,15 @@
 #include <optional>
 #include <string>
 
+#include "../app/FileStagingConflictPolicy.h"
 #include "../core/UwfModel.h"
 // 完整 include（不是前向声明）：本文件 public API 暴露
 // ExclusionListWidget::ImportOutcome 这个嵌套枚举类型，前向声明无法满足。
 #include "ExclusionListWidget.h"
+
+namespace uwf::app {
+class FileStagingStore;
+}
 
 class QAction;
 class QLabel;
@@ -34,6 +39,7 @@ class QTabWidget;
 namespace uwf::ui {
 
 class StatusPanel;
+class FileStagingWidget;
 namespace dialogs {
 class FileDialogProvider;
 }
@@ -45,11 +51,16 @@ std::string diskSupportText(core::DiskSupport s, const std::string& fileSystem);
 class DiskTab : public QWidget {
   Q_OBJECT
  public:
+  enum class InfoPage { FileExclusions, RegistryExclusions, FileStaging };
+
   // showRegistry：是否在本 tab 上挂"注册表排除"子 tab。注册表是全局的，由
   // MainWindow 选定唯一 host 盘——系统盘优先，否则第一块受支持的盘。
   explicit DiskTab(const core::DiskInfo& disk, bool showRegistry, QWidget* parent = nullptr);
   // 注入对象不转移所有权，生命周期必须覆盖本页及其子对话框。
   DiskTab(const core::DiskInfo& disk, bool showRegistry, dialogs::FileDialogProvider& fileDialogs, QWidget* parent = nullptr);
+  // 挂载本卷文件暂存；showRegistry 仅控制全局注册表排除是否由本页承载。
+  DiskTab(const core::DiskInfo& disk, bool showRegistry, dialogs::FileDialogProvider& fileDialogs, app::FileStagingStore& fileStagingStore,
+          QWidget* parent = nullptr);
 
   // UWF 不可读或进程未提权时，保护开关 / 绑定方式 / 排除列表的增删 / 提交
   // 按钮一律置灰；列表内容仍可查看、可滚动、可切换 TAB。
@@ -60,16 +71,15 @@ class DiskTab : public QWidget {
   void markLimitedFileSystem() const;
 
   [[nodiscard]] QString driveLetter() const { return QString::fromStdString(m_disk.driveLetter); }
-  // 内层"文件 / 注册表排除"TAB 的当前索引——MainWindow 在 refresh 重建 DiskTab
-  // 时按盘符记录 / 恢复，避免 refresh 把用户正看的内层 TAB 跳回 0。索引在不同
-  // 语言下都稳定（0=文件，1=注册表，仅系统盘有 1）；返回 0 用作未初始化兜底。
-  [[nodiscard]] int activeInfoTabIndex() const;
-  void setActiveInfoTabIndex(int index);
+  // MainWindow 按业务页类型恢复选择，不能保存数值索引：注册表宿主页比其它卷
+  // 多一个 TAB，相同索引可能对应不同功能。
+  [[nodiscard]] InfoPage activeInfoPage() const;
+  void setActiveInfoPage(InfoPage page);
   // 卷是否可被 UWF 保护——含 NTFS/FAT 完全支持 + exFAT/ReFS 等 limited
   // 支持。Limited 卷允许 protect 开关与绑定方式，但禁用文件排除 / commit。
-  [[nodiscard]] bool supported() const { return m_disk.support == core::DiskSupport::Supported || m_disk.support == core::DiskSupport::FileSystemLimited; }
+  [[nodiscard]] bool supported() const { return core::supportsVolumeProtection(m_disk.support); }
   // 卷的文件系统是否支持文件排除列表 / 单文件提交。仅 NTFS / FAT(32) 是 true。
-  [[nodiscard]] bool canManageExclusions() const { return m_disk.support == core::DiskSupport::Supported; }
+  [[nodiscard]] bool canManageExclusions() const { return core::supportsFileOverlayOperations(m_disk.support); }
 
   [[nodiscard]] QStringList pendingFileAdded() const;
   [[nodiscard]] QStringList pendingFileRemoved() const;
@@ -115,6 +125,8 @@ class DiskTab : public QWidget {
   void onCommitRegistryDelete();
 
  private:
+  DiskTab(const core::DiskInfo& disk, bool showRegistry, dialogs::FileDialogProvider& fileDialogs, app::FileStagingStore* fileStagingStore, QWidget* parent);
+
   // 按当前快照里的两个"当前会话"状态计算"持久化"按钮的可用性：
   //   - globalFilterOn：UWF_Filter.CurrentEnabled。false 则一切持久化都不可能成功。
   //   - thisVolumeProtected：本卷在当前会话是否受保护。false 则文件/目录持久化不可用。
@@ -125,6 +137,7 @@ class DiskTab : public QWidget {
   void refreshThemedIcons();
 
   core::DiskInfo m_disk;
+  app::FileStagingConflictPolicy m_filePathConflicts;
   QLabel* m_headingLabel = nullptr;     // 顶部盘符 + 磁盘信息
   QPushButton* m_overlayBtn = nullptr;  // "查看覆盖层文件" 按钮（仅 NTFS）
   QPushButton* m_commitBtn = nullptr;   // "持久化" 菜单按钮
@@ -137,7 +150,8 @@ class DiskTab : public QWidget {
   StatusPanel* m_status = nullptr;
   ExclusionListWidget* m_files = nullptr;
   ExclusionListWidget* m_regs = nullptr;
-  QTabWidget* m_infoTabs = nullptr;  // 内层 TAB（文件排除 / 注册表排除）
+  FileStagingWidget* m_fileStaging = nullptr;
+  QTabWidget* m_infoTabs = nullptr;  // 内层 TAB（文件排除 / 注册表排除 / 文件暂存）
   bool m_showRegistry = false;
   dialogs::FileDialogProvider& m_fileDialogs;
   // 最近一次 applySnapshot 算出的"可写"（UWF 可读 + 已提权），供

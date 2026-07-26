@@ -405,6 +405,46 @@ QPushButton#primaryBtn:disabled {
     border-color: #2F4970;
 }
 
+QPushButton#enhancedModeChangeButton[actionStyle="enable"] {
+    background: #18794E;
+    color: #FFFFFF;
+    border-color: #229A65;
+}
+
+QPushButton#enhancedModeChangeButton[actionStyle="enable"]:hover {
+    background: #229A65;
+    border-color: #35B979;
+}
+
+QPushButton#enhancedModeChangeButton[actionStyle="repair"] {
+    background: #8A5B00;
+    color: #FFFFFF;
+    border-color: #B77900;
+}
+
+QPushButton#enhancedModeChangeButton[actionStyle="repair"]:hover {
+    background: #A86F00;
+    border-color: #D39718;
+}
+
+QPushButton#enhancedModeRemoveButton {
+    background: transparent;
+    color: #F28B96;
+    border-color: #C94D58;
+}
+
+QPushButton#enhancedModeRemoveButton:hover {
+    background: rgba(201, 77, 88, 0.16);
+    border-color: #E06A75;
+}
+
+QPushButton#enhancedModeChangeButton:disabled,
+QPushButton#enhancedModeRemoveButton:disabled {
+    background: #1F2226;
+    color: #5C6168;
+    border-color: #2A2D33;
+}
+
 QStatusBar {
     background: #22252A;
     border-top: 1px solid #2E323A;

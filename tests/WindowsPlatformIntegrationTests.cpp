@@ -15,10 +15,13 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <QApplication>
+#include <QProcess>
 #include <QSignalSpy>
 #include <QtTest>
 #include <exception>
 #include <filesystem>
+#include <memory>
 
 #include "app/SecureSingleInstance.h"
 #include "ui/SystemInfoProvider.h"
@@ -39,7 +42,7 @@ class WindowsPlatformIntegrationTests final : public QObject {
   void windowsAndHardwareMetadataRemainInternallyConsistent();
   void cimv2TransportDistinguishesPresentAndMissingClasses();
   void embeddedCapabilityAndSnapshotUseTheProductionTransport();
-  void singleInstanceAcquisitionIsIdempotent();
+  void singleInstanceForwardsTypedCommandsAcrossTrustedProcesses();
 };
 
 void WindowsPlatformIntegrationTests::windowsAndHardwareMetadataRemainInternallyConsistent() {
@@ -111,20 +114,96 @@ void WindowsPlatformIntegrationTests::embeddedCapabilityAndSnapshotUseTheProduct
   }
 }
 
-void WindowsPlatformIntegrationTests::singleInstanceAcquisitionIsIdempotent() {
+void WindowsPlatformIntegrationTests::singleInstanceForwardsTypedCommandsAcrossTrustedProcesses() {
   const QString discriminator = QStringLiteral("UwfWindowsPlatformIntegrationTests.%1").arg(QCoreApplication::applicationPid());
   app::SecureSingleInstance instance(app::SecureSingleInstance::Scope{discriminator});
   QSignalSpy activation(&instance, &app::SecureSingleInstance::activationRequested);
+  QSignalSpy commit(&instance, &app::SecureSingleInstance::commitStageRequested);
   const auto first = instance.acquire();
   QCOMPARE(instance.acquire(), first);
   QCOMPARE(first, app::SecureSingleInstance::AcquireResult::Primary);
   QVERIFY(instance.errorString().isEmpty());
-  instance.enableActivationNotifications();
+  instance.enableCommandNotifications();
   QCOMPARE(activation.count(), 0);
+
+  const auto launchClient = [&](const QString& command) {
+    auto process = std::make_unique<QProcess>();
+    process->setProgram(QCoreApplication::applicationFilePath());
+    process->setArguments({QStringLiteral("--single-instance-test-client"), discriminator, command});
+    process->start();
+    return process;
+  };
+
+  auto activateClient = launchClient(QStringLiteral("activate"));
+  QVERIFY2(activateClient->waitForStarted(), qPrintable(activateClient->errorString()));
+  QTRY_COMPARE_WITH_TIMEOUT(activation.count(), 1, 3000);
+  QTRY_COMPARE_WITH_TIMEOUT(activateClient->state(), QProcess::NotRunning, 3000);
+  QCOMPARE(activateClient->exitStatus(), QProcess::NormalExit);
+  QCOMPARE(activateClient->exitCode(), 0);
+
+  auto quietClient = launchClient(QStringLiteral("ensure-running"));
+  QVERIFY2(quietClient->waitForStarted(), qPrintable(quietClient->errorString()));
+  QTRY_COMPARE_WITH_TIMEOUT(quietClient->state(), QProcess::NotRunning, 3000);
+  QCOMPARE(quietClient->exitStatus(), QProcess::NormalExit);
+  QCOMPARE(quietClient->exitCode(), 0);
+  QCOMPARE(activation.count(), 1);
+  QCOMPARE(commit.count(), 0);
+
+  const app::ApplicationCommandResult expected{app::ApplicationCommandOutcome::CompletedWithFailures, 3, 1, 1, 2, 1, QStringLiteral("one staged file failed")};
+  const QMetaObject::Connection completion = connect(&instance, &app::SecureSingleInstance::commitStageRequested, &instance,
+                                                     [&](const std::uint64_t requestToken) { instance.completeCommand(requestToken, expected); });
+  auto commitClient = launchClient(QStringLiteral("commit-stage"));
+  QVERIFY2(commitClient->waitForStarted(), qPrintable(commitClient->errorString()));
+  QTRY_COMPARE_WITH_TIMEOUT(commit.count(), 1, 3000);
+  QTRY_COMPARE_WITH_TIMEOUT(commitClient->state(), QProcess::NotRunning, 3000);
+  disconnect(completion);
+  QCOMPARE(commitClient->exitStatus(), QProcess::NormalExit);
+  QCOMPARE(commitClient->exitCode(), 0);
 }
 
 }  // namespace uwf
 
-QTEST_MAIN(uwf::WindowsPlatformIntegrationTests)
+namespace {
+
+bool equalResult(const uwf::app::ApplicationCommandResult& lhs, const uwf::app::ApplicationCommandResult& rhs) {
+  return lhs.outcome == rhs.outcome && lhs.discoveredFiles == rhs.discoveredFiles && lhs.committedFiles == rhs.committedFiles &&
+         lhs.skippedFiles == rhs.skippedFiles && lhs.skippedEntries == rhs.skippedEntries && lhs.failedFiles == rhs.failedFiles && lhs.detail == rhs.detail;
+}
+
+int runSingleInstanceClient(const QStringList& arguments) {
+  if (arguments.size() != 4) return 10;
+
+  uwf::app::ApplicationCommandKind command;
+  if (arguments[3] == QStringLiteral("activate")) {
+    command = uwf::app::ApplicationCommandKind::Activate;
+  } else if (arguments[3] == QStringLiteral("ensure-running")) {
+    command = uwf::app::ApplicationCommandKind::EnsureRunning;
+  } else if (arguments[3] == QStringLiteral("commit-stage")) {
+    command = uwf::app::ApplicationCommandKind::CommitStage;
+  } else {
+    return 11;
+  }
+
+  uwf::app::SecureSingleInstance instance(uwf::app::SecureSingleInstance::Scope{arguments[2]});
+  uwf::app::ApplicationCommandResult result;
+  if (instance.acquire(command, &result) != uwf::app::SecureSingleInstance::AcquireResult::ForwardedExisting) return 12;
+  if (command != uwf::app::ApplicationCommandKind::CommitStage) return equalResult(result, {}) ? 0 : 13;
+
+  const uwf::app::ApplicationCommandResult expected{
+      uwf::app::ApplicationCommandOutcome::CompletedWithFailures, 3, 1, 1, 2, 1, QStringLiteral("one staged file failed")};
+  return equalResult(result, expected) ? 0 : 14;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  QApplication application(argc, argv);
+  const QStringList arguments = application.arguments();
+  if (arguments.size() >= 2 && arguments[1] == QStringLiteral("--single-instance-test-client")) {
+    return runSingleInstanceClient(arguments);
+  }
+  uwf::WindowsPlatformIntegrationTests tests;
+  return QTest::qExec(&tests, argc, argv);
+}
 
 #include "WindowsPlatformIntegrationTests.moc"

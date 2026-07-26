@@ -17,27 +17,52 @@
 #pragma once
 
 #include <QObject>
+#include <exception>
 
-#include "../uwf/api/UwfFilter.h"
+#include "../app/FileStagingStore.h"
+#include "../uwf/UwfSnapshot.h"
+#include "../uwf/wmi/WmiClient.h"
+#include "FileStagingCoordinator.h"
 
 class QWidget;
 
 namespace uwf::ui {
 
-// UWF 安全关机 / 重启用例：统一二次确认、Filter 查询、WMI 调用和失败提示。
-// 工具栏与应用完成对话框直接连接这里，避免维护多份入口逻辑。
+enum class PowerAction;
+
+// UWF 安全关机 / 重启用例：先显示单一对话框，再异步展开文件暂存目录；统一
+// 提交计划、确认与进度、Filter 复核、WMI 电源调用和失败决策。工具栏与应用
+// 完成对话框直接连接这里，避免维护多份入口逻辑。
+struct PowerControllerServices {
+  WmiOperations& session;
+  app::FileStagingStore& fileStaging;
+  UwfCapability uwfCapability;
+  FileStagingCoordinator& stagingCoordinator;
+};
+
 class PowerController : public QObject {
   Q_OBJECT
  public:
-  PowerController(WmiOperations& session, QWidget* dialogParent, QObject* parent = nullptr);
+  PowerController(PowerControllerServices services, QWidget* dialogParent, QObject* parent = nullptr);
 
  public slots:
   void safeShutdown();
   void safeRestart();
 
  private:
+  void execute(PowerAction action);
+  void executeReserved(PowerAction action, FileStagingCoordinator::ExternalBatch batch);
+  void executeWithCompletedStaging(PowerAction action, FileStagingBatchResult stagingResult, FileStagingCoordinator::ExternalBatch batch);
+  void invokePowerAction(PowerAction action);
+  void reportPowerFailure(PowerAction action, const std::exception& error);
+  void reportUnknownPowerFailure(PowerAction action);
+
   QWidget* m_dialogParent;
-  api::UwfFilter m_filter;
+  WmiOperations& m_session;
+  app::FileStagingStore& m_fileStaging;
+  UwfCapability m_uwfCapability;
+  FileStagingCoordinator& m_stagingCoordinator;
+  bool m_actionActive = false;
 };
 
 }  // namespace uwf::ui

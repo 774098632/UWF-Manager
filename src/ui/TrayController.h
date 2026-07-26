@@ -48,8 +48,9 @@ class OverlayUsageBar;
 class TrayController : public QObject {
   Q_OBJECT
  public:
-  // ownerWindow 同时作为本对象与右键菜单的父对象，生命周期须覆盖本对象。
-  explicit TrayController(QWidget* ownerWindow);
+  // ownerWindow 只作为右键菜单的 QWidget 父对象；控制器自身由调用方按依赖
+  // 顺序拥有，避免同时混用 QObject 父子所有权和 C++ 所有权。
+  explicit TrayController(QWidget* ownerWindow, QObject* parent = nullptr);
 
   // 只接收展示控制器已完整读取并提交的状态；读取失败不会调用本函数，旧 UI
   // 因而保持不动。

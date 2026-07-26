@@ -21,10 +21,12 @@
 #include <QClipboard>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QElapsedTimer>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPlainTextEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QTableWidget>
@@ -33,6 +35,8 @@
 #include <QVBoxLayout>
 #include <QtTest>
 #include <algorithm>
+#include <optional>
+#include <utility>
 
 #include "core/UwfModel.h"
 #include "ui/Dialogs.h"
@@ -100,6 +104,7 @@ class UiBehaviorTests final : public QObject {
   void powerConfirmationDefaultsToCancel();
   void powerConfirmationEscapeAlwaysCancels();
   void powerConfirmationAcceptsOnlyTheExplicitAction();
+  void powerDialogShowsProgressAndFailureInPlace();
   void tableCopyReflectsTheActualSelectionAndMissingCells();
   void volumeStatusTracksOnlyChangesFromTheDisplayedSnapshot();
   void globalStatusImportProducesConstrainedPendingDelta();
@@ -224,7 +229,7 @@ void UiBehaviorTests::powerConfirmationDefaultsToCancel() {
     if (dialog->isVisible()) dialog->reject();
   });
 
-  QVERIFY(!uwf::ui::confirmPowerAction(nullptr, uwf::ui::PowerAction::Shutdown));
+  QVERIFY(uwf::ui::runPowerActionDialog(nullptr, {uwf::ui::PowerAction::Shutdown, {}}) == uwf::ui::PowerActionDialogOutcome::Canceled);
   QVERIFY(inspected);
   QVERIFY(cancelWasDefault);
   QVERIFY(enterRejectedDialog);
@@ -243,7 +248,7 @@ void UiBehaviorTests::powerConfirmationEscapeAlwaysCancels() {
     if (dialog->isVisible()) dialog->reject();
   });
 
-  QVERIFY(!uwf::ui::confirmPowerAction(nullptr, uwf::ui::PowerAction::Restart));
+  QVERIFY(uwf::ui::runPowerActionDialog(nullptr, {uwf::ui::PowerAction::Restart, {}}) == uwf::ui::PowerActionDialogOutcome::Canceled);
   QVERIFY(escapeRejectedDialog);
 }
 
@@ -251,24 +256,132 @@ void UiBehaviorTests::powerConfirmationAcceptsOnlyTheExplicitAction() {
   QString heading;
   QString actionObjectName;
   bool clicked = false;
+  bool stagingSummaryVisible = false;
+  bool actionDisabledDuringPreparation = false;
+  qint64 preparationDurationMs = -1;
+  int preparationPolls = 0;
+  QElapsedTimer preparationElapsed;
+  preparationElapsed.start();
 
-  QTimer::singleShot(0, this, [&] {
+  QTimer driver;
+  driver.setInterval(1);
+  connect(&driver, &QTimer::timeout, this, [&] {
     auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
     if (!dialog) return;
     if (auto* label = dialog->findChild<QLabel*>(QStringLiteral("powerActionHeading"))) heading = label->text();
     if (auto* action = dialog->findChild<QPushButton*>(QStringLiteral("restartBtn"))) {
+      if (!action->isEnabled()) {
+        actionDisabledDuringPreparation = true;
+        return;
+      }
+      preparationDurationMs = preparationElapsed.elapsed();
+      for (const auto* label : dialog->findChildren<QLabel*>()) {
+        if (label->text().contains(QStringLiteral("3 file(s)"))) stagingSummaryVisible = true;
+      }
       actionObjectName = action->objectName();
       clicked = true;
       QTest::mouseClick(action, Qt::LeftButton);
+      driver.stop();
     } else {
       dialog->reject();
+      driver.stop();
     }
   });
+  driver.start();
 
-  QVERIFY(uwf::ui::confirmPowerAction(nullptr, uwf::ui::PowerAction::Restart));
+  uwf::ui::PowerActionDialogRequest request{uwf::ui::PowerAction::Restart, [&]() -> std::optional<uwf::ui::PowerStagingPreparation> {
+                                              ++preparationPolls;
+                                              if (preparationPolls == 1) return std::nullopt;
+                                              return uwf::ui::PowerStagingCommit{
+                                                  3, [] { return uwf::ui::PowerStagingProgress{uwf::ui::PowerStagingState::Completed, 3, 3, {}, {}}; }};
+                                            }};
+  QVERIFY(uwf::ui::runPowerActionDialog(nullptr, std::move(request)) == uwf::ui::PowerActionDialogOutcome::Confirmed);
   QVERIFY(clicked);
+  QVERIFY(stagingSummaryVisible);
+  QVERIFY(actionDisabledDuringPreparation);
+  QVERIFY(preparationDurationMs >= 2000);
+  QCOMPARE(preparationPolls, 2);
   QCOMPARE(actionObjectName, QStringLiteral("restartBtn"));
   QVERIFY(!heading.isEmpty());
+}
+
+void UiBehaviorTests::powerDialogShowsProgressAndFailureInPlace() {
+  QDialog* initialDialog = nullptr;
+  bool actionClicked = false;
+  bool failureObserved = false;
+  bool sameDialog = false;
+  bool cancelWasDefault = false;
+  bool escapeIgnoredDuringStaging = false;
+  bool progressObserved = false;
+  int steps = 0;
+
+  QTimer driver;
+  driver.setInterval(1);
+  connect(&driver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    if (!initialDialog) initialDialog = dialog;
+
+    auto* details = dialog->findChild<QPlainTextEdit*>(QStringLiteral("powerStagingFailureDetails"));
+    if (details && details->isVisible()) {
+      failureObserved = details->toPlainText().contains(QStringLiteral("C:\\locked.bin"));
+      sameDialog = dialog == initialDialog;
+      auto* box = dialog->findChild<QDialogButtonBox*>();
+      if (box) {
+        for (auto* button : box->buttons()) {
+          if (box->buttonRole(button) != QDialogButtonBox::RejectRole) continue;
+          auto* cancel = qobject_cast<QPushButton*>(button);
+          cancelWasDefault = cancel && cancel->isDefault();
+          if (cancel) QTest::mouseClick(cancel, Qt::LeftButton);
+          driver.stop();
+          return;
+        }
+      }
+      dialog->reject();
+      driver.stop();
+      return;
+    }
+
+    if (!actionClicked) {
+      if (auto* action = dialog->findChild<QPushButton*>(QStringLiteral("restartBtn"))) {
+        if (!action->isEnabled()) return;
+        actionClicked = true;
+        QTest::mouseClick(action, Qt::LeftButton);
+      }
+    }
+  });
+  driver.start();
+
+  uwf::ui::PowerActionDialogRequest request{
+      uwf::ui::PowerAction::Restart, [&]() -> std::optional<uwf::ui::PowerStagingPreparation> {
+        return uwf::ui::PowerStagingCommit{2, [&]() {
+                                             ++steps;
+                                             if (steps == 1) {
+                                               auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                                               if (dialog) {
+                                                 QTest::keyClick(dialog, Qt::Key_Escape);
+                                                 escapeIgnoredDuringStaging = dialog->isVisible();
+                                               }
+                                               return uwf::ui::PowerStagingProgress{
+                                                   uwf::ui::PowerStagingState::InProgress, 1, 2, QStringLiteral("C:\\first.bin"), {}};
+                                             }
+                                             auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                                             auto* progress = dialog ? dialog->findChild<QProgressBar*>(QStringLiteral("powerStagingProgress")) : nullptr;
+                                             auto* path = dialog ? dialog->findChild<QLineEdit*>(QStringLiteral("powerStagingCurrentPath")) : nullptr;
+                                             progressObserved = progress && progress->isVisible() && progress->value() == 1 && progress->maximum() == 2 &&
+                                                                path && path->text() == QStringLiteral("C:\\first.bin");
+                                             return uwf::ui::PowerStagingProgress{uwf::ui::PowerStagingState::Failed, 2, 2, QStringLiteral("C:\\locked.bin"),
+                                                                                  QStringLiteral("C:\\locked.bin\nProvider rejected the commit.")};
+                                           }};
+      }};
+  QVERIFY(uwf::ui::runPowerActionDialog(nullptr, std::move(request)) == uwf::ui::PowerActionDialogOutcome::CanceledAfterStagingFailure);
+  QCOMPARE(steps, 2);
+  QVERIFY(actionClicked);
+  QVERIFY(failureObserved);
+  QVERIFY(sameDialog);
+  QVERIFY(cancelWasDefault);
+  QVERIFY(escapeIgnoredDuringStaging);
+  QVERIFY(progressObserved);
 }
 
 void UiBehaviorTests::tableCopyReflectsTheActualSelectionAndMissingCells() {

@@ -37,6 +37,7 @@
 #include <exception>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -564,7 +565,7 @@ int OverlayFilesDialog::rowHeight() {
     m_list->addItem(probe);
   }
   const int h = m_list->sizeHintForRow(0);
-  if (empty) delete m_list->takeItem(0);
+  if (empty) std::unique_ptr<QListWidgetItem>{m_list->takeItem(0)};
   if (h > 0) m_rowHeight = h;
   return m_rowHeight > 0 ? m_rowHeight : kBaseRowHeight;
 }

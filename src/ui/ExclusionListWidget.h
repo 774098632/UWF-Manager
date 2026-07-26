@@ -29,6 +29,10 @@ class QLabel;
 class QPushButton;
 class QAction;
 
+namespace uwf::app {
+class FileStagingConflictPolicy;
+}
+
 namespace uwf::ui {
 
 class RoundedCornerOverlay;
@@ -43,6 +47,7 @@ class ExclusionListWidget : public QWidget {
   explicit ExclusionListWidget(Kind kind, QWidget* parent = nullptr);
   // 注入对象不转移所有权，生命周期必须覆盖本控件。
   ExclusionListWidget(Kind kind, dialogs::FileDialogProvider& fileDialogs, QWidget* parent = nullptr);
+  ExclusionListWidget(Kind kind, dialogs::FileDialogProvider& fileDialogs, app::FileStagingConflictPolicy& conflicts, QWidget* parent = nullptr);
 
   void setDriveLetter(const QString& dl);
   void setBaseline(const QStringList& currentSession, const QStringList& nextSession);
@@ -76,6 +81,7 @@ class ExclusionListWidget : public QWidget {
     NoOp,                 // 已经在目标状态，无须再动
     RejectedNotOnVolume,  // 仅 File：路径不在本卷
     RejectedForbidden,    // 触发 UWF 不允许排除的黑名单
+    RejectedConflict,     // 与同一卷的文件暂存路径相交
   };
   ImportOutcome importAdd(const QString& raw);
   ImportOutcome importRemove(const QString& raw);
@@ -99,6 +105,7 @@ class ExclusionListWidget : public QWidget {
   bool eventFilter(QObject* obj, QEvent* ev) override;
 
  private:
+  ExclusionListWidget(Kind kind, dialogs::FileDialogProvider& fileDialogs, app::FileStagingConflictPolicy* conflicts, QWidget* parent);
   void rebuild();
   void addPendingEntry(const QString& raw);
   // 主题切换时刷新顶部按钮 / 菜单项的 icon，并触发 list rebuild 让条目
@@ -108,6 +115,9 @@ class ExclusionListWidget : public QWidget {
   void openContainingFolder(const QString& entry) const;
   // item 对应的完整路径：文件列表拼成带盘符的绝对路径，注册表列表即键全路径。
   [[nodiscard]] QString entryFullPath(const QListWidgetItem* item) const;
+  [[nodiscard]] QString absoluteFilePath(const QString& path) const;
+  [[nodiscard]] QStringList effectiveFileExclusions() const;
+  void publishFileExclusions() const;
   // 把 path 复制到剪贴板并发出 copiedToClipboard 提示。
   void copyPathToClipboard(const QString& path);
 
@@ -130,6 +140,7 @@ class ExclusionListWidget : public QWidget {
 
   Kind m_kind;
   dialogs::FileDialogProvider& m_fileDialogs;
+  app::FileStagingConflictPolicy* m_conflicts = nullptr;
   QString m_driveLetter;
   QStringList m_current;
   QStringList m_next;

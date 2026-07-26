@@ -15,12 +15,19 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <QApplication>
+#include <QCoreApplication>
+#include <QTimer>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <optional>
+#include <stdexcept>
 
 #include "src/app/CrashHandler.h"
+#include "src/app/FileStagingStore.h"
 #include "src/app/SecureSingleInstance.h"
 #include "src/app/StartupOptions.h"
+#include "src/service/EnhancedModeService.h"
 #include "src/ui/CenteredTextStyle.h"
 #include "src/ui/I18n.h"
 #include "src/ui/MainWindow.h"
@@ -32,18 +39,22 @@
 
 namespace {
 
-bool handleSingleInstanceStartup(uwf::app::SecureSingleInstance& singleInstance) {
+std::optional<int> handleSingleInstanceStartup(uwf::app::SecureSingleInstance& singleInstance, const uwf::app::StartupOptions& options) {
   // 单实例：已有实例在运行则切到它并退出，不再启动第二个窗口。放在最前面——
   // 系统检查等重活之前；若只是把任务转交给已有实例，没必要白做这些。
-  const auto acquireResult = singleInstance.acquire();
-  if (acquireResult == uwf::app::SecureSingleInstance::AcquireResult::ActivatedExisting) {
-    UWF_LOG_I("main") << "existing instance activated; current process exiting";
-    return false;
+  uwf::app::ApplicationCommandResult forwardedResult;
+  const auto acquireResult = singleInstance.acquire(options.initialCommand(), &forwardedResult);
+  if (acquireResult == uwf::app::SecureSingleInstance::AcquireResult::ForwardedExisting) {
+    UWF_LOG_I("main") << "startup command forwarded to existing instance: command=" << static_cast<int>(options.initialCommand())
+                      << " outcome=" << static_cast<int>(forwardedResult.outcome);
+    // CompletedWithFailures 是服务关机编排可以接受的“最终结果”，但对显式
+    // --commit-stage 命令仍应返回非零退出码，不能向脚本隐藏逐项失败。
+    return forwardedResult.outcome == uwf::app::ApplicationCommandOutcome::Succeeded ? EXIT_SUCCESS : EXIT_FAILURE;
   }
   if (acquireResult == uwf::app::SecureSingleInstance::AcquireResult::Unprotected) {
     UWF_LOG_W("main") << "single-instance server unavailable: error=" << singleInstance.errorString().toStdString();
   }
-  return true;
+  return std::nullopt;
 }
 
 void initializeUserInterface(QApplication& app) {
@@ -94,32 +105,54 @@ uwf::SystemCheckResult checkRuntimeEnvironment() {
   return check;
 }
 
-int runMainWindow(QApplication& app, uwf::app::SecureSingleInstance& singleInstance, const uwf::SystemCheckResult& check,
-                  const uwf::UwfCapability uwfCapability) {
+int runMainWindow(QApplication& app, uwf::app::SecureSingleInstance& singleInstance, const uwf::app::StartupOptions& options,
+                  const uwf::SystemCheckResult& check, const uwf::UwfCapability uwfCapability) {
   uwf::ui::MainWindow w(uwfCapability, check.status == uwf::CheckStatus::UnsupportedSystem, QString::fromStdString(check.productName),
                         QString::fromStdString(check.editionId));
 
   QObject::connect(&singleInstance, &uwf::app::SecureSingleInstance::activationRequested, &w, &uwf::ui::MainWindow::raiseToFront);
-  singleInstance.enableActivationNotifications();
+  QObject::connect(&singleInstance, &uwf::app::SecureSingleInstance::commitStageRequested, &w, [&](const std::uint64_t requestToken) {
+    w.requestFileStagingCommit(uwf::ui::FileStagingRequestOrigin::UserCommand, [&singleInstance, requestToken](const uwf::ui::FileStagingBatchResult& result) {
+      singleInstance.completeCommand(requestToken, result.command);
+    });
+  });
+  singleInstance.enableCommandNotifications();
 
-  const auto startupOptions = uwf::app::parseStartupOptions(app.arguments());
-  if (startupOptions.mode == uwf::app::StartupMode::Quiet) {
-    UWF_LOG_I("main") << "startup mode selected: mode=quiet presentation=system-tray";
-    w.startInTray();
-  } else {
-    w.show();
+  switch (options.mode) {
+    case uwf::app::StartupMode::Interactive:
+      w.show();
+      break;
+    case uwf::app::StartupMode::Quiet:
+      UWF_LOG_I("main") << "startup mode selected: mode=quiet presentation=system-tray";
+      w.startInTray();
+      break;
+    case uwf::app::StartupMode::CommitStage:
+      UWF_LOG_I("main") << "startup mode selected: mode=commit-stage presentation=system-tray";
+      w.startInTray();
+      QTimer::singleShot(0, &w, [&app, &w] {
+        w.requestFileStagingCommit(uwf::ui::FileStagingRequestOrigin::UserCommand, [&app](const uwf::ui::FileStagingBatchResult& result) {
+          UWF_LOG_I("main") << "startup file staging command completed: outcome=" << static_cast<int>(result.command.outcome)
+                            << " committed=" << result.command.committedFiles << " failures=" << result.command.failedFiles;
+          app.exit(result.command.outcome == uwf::app::ApplicationCommandOutcome::Succeeded ? EXIT_SUCCESS : EXIT_FAILURE);
+        });
+      });
+      break;
+    case uwf::app::StartupMode::Service:
+    case uwf::app::StartupMode::InstallService:
+    case uwf::app::StartupMode::UninstallService:
+      throw std::logic_error("service startup mode reached the UI dispatcher");
   }
   return app.exec();
 }
 
-int runApplication(int argc, char* argv[]) {
+int runApplication(int argc, char* argv[], const uwf::app::StartupOptions& options) {
   QApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
   QApplication app(argc, argv);
   app.setApplicationName("UWF Manager");
   app.setOrganizationName("UWF");
   app.setWindowIcon(QIcon(":/icons/app.svg"));
   uwf::app::SecureSingleInstance singleInstance;
-  if (!handleSingleInstanceStartup(singleInstance)) return 0;
+  if (const auto forwardedExitCode = handleSingleInstanceStartup(singleInstance, options)) return *forwardedExitCode;
 
   initializeUserInterface(app);
   UWF_LOG_I("main") << "application started: pid=" << QCoreApplication::applicationPid();
@@ -134,15 +167,75 @@ int runApplication(int argc, char* argv[]) {
   if (uwfCapability == uwf::UwfCapability::Unavailable) {
     UWF_LOG_W("main") << "UWF unavailable: reason=filter-class-or-namespace-not-registered";
   }
-  return runMainWindow(app, singleInstance, check, uwfCapability);
+  // 文件暂存注册表的排除关系属于启动维护，不属于 UI 刷新。这里只执行一次；
+  // 失败保留现有数据并记录，窗口随后仍可启动供用户检查和修复。
+  if (uwf::isElevated()) {
+    try {
+      uwf::app::registryFileStagingStore(uwf::embeddedWmiSession(), uwfCapability).reconcileDurability();
+    } catch (const std::exception& error) {
+      UWF_LOG_W("staging") << "file staging durability maintenance failed: error=" << error.what();
+    } catch (...) {
+      UWF_LOG_W("staging") << "file staging durability maintenance failed: error=non-standard-exception";
+    }
+  }
+  return runMainWindow(app, singleInstance, options, check, uwfCapability);
+}
+
+QStringList startupArguments(const int argc, char* argv[]) {
+  QStringList arguments;
+  arguments.reserve(argc);
+  for (int index = 0; index < argc; ++index) arguments.append(QString::fromLocal8Bit(argv[index]));
+  return arguments;
+}
+
+int runServiceControlCommand(int argc, char* argv[], const uwf::app::StartupMode mode) {
+  QCoreApplication app(argc, argv);
+  app.setApplicationName("UWF Manager");
+  (void)uwf::ui::I18n::instance();
+  uwf::initializeWmiRuntime();
+  const auto capability = uwf::probeUwfCapability();
+  uwf::service::WindowsEnhancedModeServiceControl serviceControl;
+  uwf::service::EnhancedModeManager manager(serviceControl, uwf::embeddedWmiSession(), capability);
+  uwf::service::EnhancedModeChangeResult result;
+  switch (mode) {
+    case uwf::app::StartupMode::InstallService:
+      result = manager.enable(uwf::ui::I18n::enhancedModeServiceDescription());
+      break;
+    case uwf::app::StartupMode::UninstallService:
+      result = manager.disable();
+      break;
+    case uwf::app::StartupMode::Interactive:
+    case uwf::app::StartupMode::Quiet:
+    case uwf::app::StartupMode::CommitStage:
+    case uwf::app::StartupMode::Service:
+      throw std::logic_error("non-control startup mode reached the service-control dispatcher");
+  }
+  if (!result.persistenceWarning.isEmpty()) {
+    UWF_LOG_W("service") << "enhanced mode changed with UWF persistence warning: error=" << result.persistenceWarning.toStdString();
+  }
+  const bool reachedTarget = mode == uwf::app::StartupMode::InstallService ? result.status.state == uwf::service::EnhancedModeState::Enabled
+                                                                           : result.status.state == uwf::service::EnhancedModeState::Disabled;
+  return reachedTarget ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 }  // namespace
 
 int main(int argc, char* argv[]) {
-  uwf::app::CrashHandler::install();
   try {
-    return runApplication(argc, argv);
+    const auto options = uwf::app::parseStartupOptions(startupArguments(argc, argv));
+    switch (options.mode) {
+      case uwf::app::StartupMode::Service:
+        return uwf::service::runEnhancedModeService();
+      case uwf::app::StartupMode::InstallService:
+      case uwf::app::StartupMode::UninstallService:
+        return runServiceControlCommand(argc, argv, options.mode);
+      case uwf::app::StartupMode::Interactive:
+      case uwf::app::StartupMode::Quiet:
+      case uwf::app::StartupMode::CommitStage:
+        uwf::app::CrashHandler::install();
+        return runApplication(argc, argv, options);
+    }
+    throw std::logic_error("unknown startup mode");
   } catch (const std::exception& error) {
     UWF_LOG_E("main") << "fatal application error: error=" << error.what();
   } catch (...) {

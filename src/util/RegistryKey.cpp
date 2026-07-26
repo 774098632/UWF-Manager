@@ -18,8 +18,11 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <format>
+#include <limits>
+#include <stdexcept>
 #include <system_error>
 #include <utility>
 
@@ -65,29 +68,39 @@ class RegistryHandle final {
   HKEY m_handle = nullptr;
 };
 
+struct RegistryAddress {
+  HKEY root = nullptr;
+  std::wstring subkey;
+};
+
+LONG resolveAddress(std::string_view key, RegistryAddress& address) {
+  const std::string normalized = normalize(std::string(key));
+  if (normalized.empty()) return ERROR_INVALID_PARAMETER;
+  const size_t firstSlash = normalized.find('\\');
+
+  const std::string hive = toUpperAscii(firstSlash == std::string::npos ? normalized : normalized.substr(0, firstSlash));
+  for (const auto& candidate : kHives) {
+    if (hive == candidate.longForm) {
+      address.root = candidate.handle;
+      break;
+    }
+  }
+  if (!address.root) return ERROR_INVALID_PARAMETER;
+
+  address.subkey = firstSlash == std::string::npos ? std::wstring{} : utf8ToWide(normalized.substr(firstSlash + 1));
+  return ERROR_SUCCESS;
+}
+
 // 把 key 归一、解析 hive、以只读方式打开。成功时 outKey 拥有已打开句柄；
 // hive 无法识别或键不存在返回对应的 Win32 状态码。
 // 单独 hive（如 "HKEY_LOCAL_MACHINE"，无子键）合法——RegOpenKeyExW 收空 lpSubKey
 // 会返回一份指向该 hive 自身的新句柄，可被 RegEnumKeyEx / RegCloseKey 正常使用。
 // picker 树根节点展开就走这条路径。
 LONG openForReadStatus(std::string_view key, RegistryHandle& outKey) {
-  const std::string normalized = normalize(std::string(key));
-  if (normalized.empty()) return ERROR_INVALID_PARAMETER;
-  const size_t firstSlash = normalized.find('\\');
-
-  // 没有反斜杠时整串就是 hive；有时反斜杠前是 hive、之后是子键路径。
-  const std::string hive = toUpperAscii(firstSlash == std::string::npos ? normalized : normalized.substr(0, firstSlash));
-  HKEY root = nullptr;
-  for (const auto& h : kHives) {
-    if (hive == h.longForm) {
-      root = h.handle;
-      break;
-    }
-  }
-  if (!root) return ERROR_INVALID_PARAMETER;  // hive 无法识别
-
-  const std::wstring subkey = firstSlash == std::string::npos ? std::wstring{} : utf8ToWide(normalized.substr(firstSlash + 1));
-  return RegOpenKeyExW(root, subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, outKey.put());
+  RegistryAddress address;
+  const LONG resolveStatus = resolveAddress(key, address);
+  if (resolveStatus != ERROR_SUCCESS) return resolveStatus;
+  return RegOpenKeyExW(address.root, address.subkey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, outKey.put());
 }
 
 bool isNotFound(const LONG status) { return status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND; }
@@ -194,6 +207,98 @@ std::optional<std::uint32_t> readDword(std::string_view key, std::string_view va
   if (type != REG_DWORD) throwRegistryTypeError(type, "REG_DWORD");
   if (bytes != sizeof(value)) throwRegistryProbeError(ERROR_INVALID_DATA, "read registry DWORD with an invalid byte length");
   return value;
+}
+
+std::optional<std::vector<std::string>> readMultiString(std::string_view key, std::string_view valueName) {
+  RegistryHandle opened;
+  if (!openForRead(key, opened)) return std::nullopt;
+
+  const std::wstring wideValue = utf8ToWide(valueName);
+  DWORD type = 0;
+  DWORD bytes = 0;
+  const LONG sizeStatus = RegQueryValueExW(opened.get(), wideValue.c_str(), nullptr, &type, nullptr, &bytes);
+  if (isNotFound(sizeStatus)) return std::nullopt;
+  if (sizeStatus != ERROR_SUCCESS) throwRegistryProbeError(sizeStatus, "read registry multi-string size");
+  if (type != REG_MULTI_SZ) throwRegistryTypeError(type, "REG_MULTI_SZ");
+  if (bytes < 2 * sizeof(wchar_t) || bytes % sizeof(wchar_t) != 0) {
+    throwRegistryProbeError(ERROR_INVALID_DATA, "read registry multi-string with an invalid byte length");
+  }
+
+  std::vector<wchar_t> data(bytes / sizeof(wchar_t), L'\0');
+  DWORD got = bytes;
+  DWORD readType = 0;
+  const LONG readStatus = RegQueryValueExW(opened.get(), wideValue.c_str(), nullptr, &readType, reinterpret_cast<LPBYTE>(data.data()), &got);
+  if (isNotFound(readStatus)) return std::nullopt;
+  if (readStatus != ERROR_SUCCESS) throwRegistryProbeError(readStatus, "read registry multi-string");
+  if (readType != REG_MULTI_SZ) throwRegistryTypeError(readType, "REG_MULTI_SZ");
+  if (got < 2 * sizeof(wchar_t) || got % sizeof(wchar_t) != 0) {
+    throwRegistryProbeError(ERROR_INVALID_DATA, "read registry multi-string with an invalid byte length");
+  }
+
+  const std::size_t characters = got / sizeof(wchar_t);
+  if (data[characters - 1] != L'\0' || data[characters - 2] != L'\0') {
+    throwRegistryProbeError(ERROR_INVALID_DATA, "read registry multi-string without a double-NUL terminator");
+  }
+
+  std::vector<std::string> values;
+  std::size_t offset = 0;
+  while (offset + 1 < characters && data[offset] != L'\0') {
+    const auto begin = data.cbegin() + static_cast<std::ptrdiff_t>(offset);
+    const auto end = std::find(begin, data.cend(), L'\0');
+    if (end == data.cend()) {
+      throwRegistryProbeError(ERROR_INVALID_DATA, "read malformed registry multi-string");
+    }
+    values.push_back(wideToUtf8(std::wstring_view(data.data() + offset, static_cast<std::size_t>(end - begin))));
+    offset = static_cast<std::size_t>(end - data.cbegin()) + 1;
+  }
+  if (std::any_of(data.cbegin() + static_cast<std::ptrdiff_t>(offset), data.cend(), [](const wchar_t value) { return value != L'\0'; })) {
+    throwRegistryProbeError(ERROR_INVALID_DATA, "read registry multi-string with data after its terminator");
+  }
+  return values;
+}
+
+void writeMultiString(std::string_view key, std::string_view valueName, const std::vector<std::string>& values) {
+  RegistryAddress address;
+  const LONG resolveStatus = resolveAddress(key, address);
+  if (resolveStatus != ERROR_SUCCESS) throwRegistryProbeError(resolveStatus, "resolve registry key for writing");
+
+  RegistryHandle opened;
+  DWORD disposition = 0;
+  const LONG createStatus = RegCreateKeyExW(address.root, address.subkey.c_str(), 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE | KEY_WOW64_64KEY, nullptr,
+                                            opened.put(), &disposition);
+  if (createStatus != ERROR_SUCCESS) throwRegistryProbeError(createStatus, "create registry key for writing");
+
+  std::vector<wchar_t> data;
+  for (const auto& value : values) {
+    if (value.empty()) throw std::invalid_argument("registry multi-string entries cannot be empty");
+    if (value.find('\0') != std::string::npos) {
+      throw std::invalid_argument("registry multi-string entries cannot contain NUL characters");
+    }
+    const std::wstring wide = utf8ToWide(value);
+    data.insert(data.end(), wide.begin(), wide.end());
+    data.push_back(L'\0');
+  }
+  data.push_back(L'\0');
+  if (values.empty()) data.push_back(L'\0');
+
+  const std::wstring wideValue = utf8ToWide(valueName);
+  if (data.size() > std::numeric_limits<DWORD>::max() / sizeof(wchar_t)) {
+    throw std::length_error("registry multi-string is too large");
+  }
+  const auto bytes = static_cast<DWORD>(data.size() * sizeof(wchar_t));
+  const LONG setStatus = RegSetValueExW(opened.get(), wideValue.c_str(), 0, REG_MULTI_SZ, reinterpret_cast<const BYTE*>(data.data()), bytes);
+  if (setStatus != ERROR_SUCCESS) throwRegistryProbeError(setStatus, "write registry multi-string");
+}
+
+void deleteTree(std::string_view key) {
+  RegistryAddress address;
+  const LONG resolveStatus = resolveAddress(key, address);
+  if (resolveStatus != ERROR_SUCCESS) throwRegistryProbeError(resolveStatus, "resolve registry key for recursive deletion");
+  if (address.subkey.empty()) throw std::invalid_argument("a registry hive root cannot be recursively deleted");
+
+  const LONG deleteStatus = RegDeleteTreeW(address.root, address.subkey.c_str());
+  if (isNotFound(deleteStatus)) return;
+  if (deleteStatus != ERROR_SUCCESS) throwRegistryProbeError(deleteStatus, "recursively delete registry key");
 }
 
 std::vector<std::string> subkeyNames(std::string_view key) {

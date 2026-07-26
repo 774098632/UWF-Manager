@@ -34,6 +34,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <exception>
+#include <memory>
 #include <system_error>
 
 #include "../core/RegistryExclusionPolicy.h"
@@ -398,7 +399,7 @@ void RegistryPickerDialog::loadChildren(QTreeWidgetItem* item) {
   // 只有完整读取成功后才提交 UI 状态；失败时保留占位项和未加载标记，用户可以
   // 在权限或瞬时故障恢复后直接重试。
   item->setData(0, kLoadedRole, true);
-  while (item->childCount() > 0) delete item->takeChild(0);
+  while (item->childCount() > 0) std::unique_ptr<QTreeWidgetItem>{item->takeChild(0)};
   for (const auto& childDescription : children) {
     const auto& name = childDescription.name;
     auto* child = new QTreeWidgetItem(item, QStringList{QString::fromStdString(name)});

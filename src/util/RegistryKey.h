@@ -62,6 +62,18 @@ std::string normalize(const std::string& key);
 // engaged optional；类型或长度不符以及其他读取失败抛异常。
 [[nodiscard]] std::optional<std::uint32_t> readDword(std::string_view key, std::string_view valueName);
 
+// 读取 REG_MULTI_SZ。键 / 值不存在返回 nullopt；合法的空列表返回 engaged
+// optional。数据类型错误、缺少双 NUL 终止符或其他读取失败抛异常。
+[[nodiscard]] std::optional<std::vector<std::string>> readMultiString(std::string_view key, std::string_view valueName);
+
+// 创建（或打开）key，并以单个 REG_MULTI_SZ 值原子替换整个字符串列表。
+// 空列表写成合法的双 NUL 数据；字符串内部含 NUL 时拒绝写入。
+void writeMultiString(std::string_view key, std::string_view valueName, const std::vector<std::string>& values);
+
+// 递归删除 key 及其全部子键和值。键明确不存在时视为幂等成功；权限不足、
+// hive 非法或其它 Win32 错误抛 std::system_error。始终操作 64 位注册表视图。
+void deleteTree(std::string_view key);
+
 // 列出 key 的直接子键名（仅名字，不含完整路径）。键不存在返回空；无效 hive、
 // 权限不足或枚举失败抛 std::system_error。
 [[nodiscard]] std::vector<std::string> subkeyNames(std::string_view key);
