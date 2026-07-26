@@ -32,7 +32,7 @@ constexpr std::array<char, 4> kMagic{'U', 'W', 'F', 'C'};
 constexpr std::uint16_t kProtocolVersion = 1;
 constexpr std::size_t kHeaderSize = 24;
 constexpr std::size_t kResultFixedPayloadSize = 48;
-constexpr std::size_t kMaximumPayloadSize = 64 * 1024;
+constexpr std::size_t kMaximumPayloadSize = std::size_t{64} * 1024;
 constexpr std::string_view kTruncatedDetailSuffix = "\n…";
 
 enum class FrameKind : std::uint16_t {

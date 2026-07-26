@@ -1267,10 +1267,12 @@ void ApplicationUiBehaviorTests::mainWindowEnhancedModeActionTracksTheServiceLif
     auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
     if (!dialog || dialog->objectName() != QStringLiteral("enhancedModeDialog")) return;
     auto* status = dialog->findChild<QLabel*>(QStringLiteral("enhancedModeStatus"));
+    auto* issue = dialog->findChild<QLabel*>(QStringLiteral("enhancedModeIssue"));
     auto* change = dialog->findChild<QPushButton*>(QStringLiteral("enhancedModeChangeButton"));
-    if (!status || !change || status->text() != QStringLiteral("Status: Disabled")) return;
+    if (!status || !issue || !change || status->text() != QStringLiteral("Status: Disabled")) return;
     enableDialogObserved = true;
     change->click();
+    QCOMPARE(issue->text(), QStringLiteral("Waiting for the UI agent to complete authentication."));
     dialog->reject();
   });
   enhancedAction->trigger();
@@ -1824,12 +1826,14 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   rejectedPowerWmi.invocationFailure = std::make_exception_ptr(WmiProviderError(5, "request shutdown", "provider rejected shutdown"));
   ui::FileStagingCoordinator rejectedPowerCoordinator(rejectedPowerWmi, staging, UwfCapability::Available, nullptr);
   std::vector<bool> rejectedPowerPreshutdownStates;
+  bool filterReadBeforePreshutdownToken = false;
   using PreshutdownControlResult = ui::PowerControllerServices::PreshutdownControlResult;
   ui::PowerController rejectedPowerController({rejectedPowerWmi,
                                                staging,
                                                UwfCapability::Available,
                                                rejectedPowerCoordinator,
                                                {[&] {
+                                                  filterReadBeforePreshutdownToken = rejectedPowerWmi.queryResults.empty();
                                                   rejectedPowerPreshutdownStates.push_back(true);
                                                   return PreshutdownControlResult::Acknowledged;
                                                 },
@@ -1860,6 +1864,7 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   rejectedPowerController.safeShutdown();
   QVERIFY(rejectedPowerConfirmed);
   QVERIFY(rejectedPowerWarningClosed);
+  QVERIFY(filterReadBeforePreshutdownToken);
   QCOMPARE(rejectedPowerPreshutdownStates, (std::vector<bool>{true, false}));
 
   wmi.queryResults.push_back(

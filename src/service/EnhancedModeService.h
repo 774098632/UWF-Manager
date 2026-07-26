@@ -201,6 +201,7 @@ class EnhancedModeManager final : public QObject {
   void agentConnectionStateChanged(uwf::service::EnhancedModeAgentState state);
 
  private:
+  [[nodiscard]] EnhancedModeChangeResult publishChangeResult(QString persistenceWarning);
   [[nodiscard]] QString persistInstallation() const;
   // nullopt 表示当前删除会直接落盘；engaged 表示 UWF 正在保护当前会话，
   // 且破坏性 SCM 操作开始前已经完整冻结待删除注册表树。能力读取或规划失败

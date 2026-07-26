@@ -463,6 +463,18 @@ class ServiceRuntime final {
   }
 
  private:
+  struct StatusUpdate {
+    DWORD state;
+    DWORD controls = 0;
+    DWORD checkpoint = 0;
+    DWORD waitHint = 0;
+  };
+
+  struct ControlRequest {
+    DWORD control;
+    DWORD eventType;
+  };
+
   static void WINAPI serviceMainThunk(DWORD, LPWSTR*) {
     try {
       instance().serviceMain();
@@ -476,7 +488,7 @@ class ServiceRuntime final {
 
   static DWORD WINAPI handlerThunk(const DWORD control, const DWORD eventType, void*, void* context) {
     try {
-      return static_cast<ServiceRuntime*>(context)->handleControl(control, eventType);
+      return static_cast<ServiceRuntime*>(context)->handleControl({.control = control, .eventType = eventType});
     } catch (...) {
       return ERROR_EXCEPTION_IN_SERVICE;
     }
@@ -485,7 +497,7 @@ class ServiceRuntime final {
   void serviceMain() {
     m_statusHandle = RegisterServiceCtrlHandlerExW(kEnhancedServiceName, &ServiceRuntime::handlerThunk, this);
     if (!m_statusHandle) throwSystemError("register enhanced mode service handler");
-    report(SERVICE_START_PENDING, 0, 1, kServiceWaitHintMs);
+    report({.state = SERVICE_START_PENDING, .checkpoint = 1, .waitHint = kServiceWaitHintMs});
     try {
       m_stopEvent.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
       m_preshutdownEvent.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
@@ -500,7 +512,7 @@ class ServiceRuntime final {
       m_supervisorThread = std::jthread(
           [this](const std::stop_token stopToken) { runInfrastructureThread("enhanced mode agent supervisor", [&] { superviseAgent(stopToken); }); });
       SetEvent(m_agentNeededEvent.get());
-      report(SERVICE_RUNNING, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN | SERVICE_ACCEPT_SESSIONCHANGE, 0, 0);
+      report({.state = SERVICE_RUNNING, .controls = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN | SERVICE_ACCEPT_SESSIONCHANGE});
 
       const HANDLE events[] = {m_stopEvent.get(), m_preshutdownEvent.get()};
       const DWORD wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
@@ -521,11 +533,11 @@ class ServiceRuntime final {
     }
   }
 
-  DWORD handleControl(const DWORD control, const DWORD eventType) {
-    switch (control) {
+  DWORD handleControl(const ControlRequest& request) {
+    switch (request.control) {
       case SERVICE_CONTROL_STOP:
         if (!m_preshutdownStarted.load(std::memory_order_acquire)) {
-          report(SERVICE_STOP_PENDING, 0, 1, kServiceWaitHintMs);
+          report({.state = SERVICE_STOP_PENDING, .checkpoint = 1, .waitHint = kServiceWaitHintMs});
           SetEvent(m_stopEvent.get());
         }
         return NO_ERROR;
@@ -533,7 +545,7 @@ class ServiceRuntime final {
         bool expected = false;
         if (!m_preshutdownStarted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return NO_ERROR;
         try {
-          report(SERVICE_STOP_PENDING, 0, nextCheckpoint(), kServiceWaitHintMs);
+          report({.state = SERVICE_STOP_PENDING, .checkpoint = nextCheckpoint(), .waitHint = kServiceWaitHintMs});
           if (!SetEvent(m_preshutdownEvent.get())) throwSystemError("request enhanced mode preshutdown");
         } catch (...) {
           m_preshutdownStarted.store(false, std::memory_order_release);
@@ -542,7 +554,7 @@ class ServiceRuntime final {
         return NO_ERROR;
       }
       case SERVICE_CONTROL_SESSIONCHANGE:
-        if (sessionChangeRequiresAgent(eventType)) SetEvent(m_agentNeededEvent.get());
+        if (sessionChangeRequiresAgent(request.eventType)) SetEvent(m_agentNeededEvent.get());
         return NO_ERROR;
       case SERVICE_CONTROL_INTERROGATE:
         publishCurrentStatus();
@@ -566,15 +578,15 @@ class ServiceRuntime final {
     }
   }
 
-  void report(const DWORD state, const DWORD controls, const DWORD checkpoint, const DWORD waitHint) {
+  void report(const StatusUpdate& update) {
     std::scoped_lock lock(m_statusMutex);
     m_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
-    m_status.dwCurrentState = state;
-    m_status.dwControlsAccepted = controls;
+    m_status.dwCurrentState = update.state;
+    m_status.dwControlsAccepted = update.controls;
     m_status.dwWin32ExitCode = NO_ERROR;
     m_status.dwServiceSpecificExitCode = 0;
-    m_status.dwCheckPoint = checkpoint;
-    m_status.dwWaitHint = waitHint;
+    m_status.dwCheckPoint = update.checkpoint;
+    m_status.dwWaitHint = update.waitHint;
     if (m_statusHandle && !SetServiceStatus(m_statusHandle, &m_status)) throwSystemError("publish enhanced mode service status");
   }
 
@@ -597,7 +609,7 @@ class ServiceRuntime final {
 
   DWORD nextCheckpoint() { return m_checkpoint.fetch_add(1, std::memory_order_relaxed) + 1; }
 
-  void reportRealProgress() { report(SERVICE_STOP_PENDING, 0, nextCheckpoint(), kServiceWaitHintMs); }
+  void reportRealProgress() { report({.state = SERVICE_STOP_PENDING, .checkpoint = nextCheckpoint(), .waitHint = kServiceWaitHintMs}); }
 
   void acceptAgents(const std::stop_token stopToken) {
     LocalMemory descriptor;

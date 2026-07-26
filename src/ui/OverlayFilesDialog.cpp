@@ -568,7 +568,9 @@ int OverlayFilesDialog::rowHeight() {
     m_list->addItem(probe);
   }
   const int h = m_list->sizeHintForRow(0);
-  if (empty) std::unique_ptr<QListWidgetItem>{m_list->takeItem(0)};
+  if (empty) {
+    const std::unique_ptr<QListWidgetItem> removedProbe{m_list->takeItem(0)};
+  }
   if (h > 0) m_rowHeight = h;
   return m_rowHeight > 0 ? m_rowHeight : kBaseRowHeight;
 }

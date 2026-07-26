@@ -130,7 +130,7 @@ bool configuredCommandMatches(const wchar_t* commandLine) {
   int argumentCount = 0;
   LPWSTR* arguments = CommandLineToArgvW(commandLine, &argumentCount);
   if (!arguments) return false;
-  const auto release = qScopeGuard([arguments] { LocalFree(arguments); });
+  const auto release = qScopeGuard([arguments] { LocalFree(static_cast<void*>(arguments)); });
   if (argumentCount != 2 || std::wstring_view(arguments[1]) != L"--service") return false;
 
   const QString configured = QDir::cleanPath(QString::fromWCharArray(arguments[0]));
@@ -372,17 +372,22 @@ EnhancedModeStatus EnhancedModeManager::status() const {
 
 EnhancedModeChangeResult EnhancedModeManager::enable(const QString& serviceDescription) {
   m_serviceControl.installAndStart(serviceDescription);
-  const QString persistenceWarning = persistInstallation();
-  EnhancedModeChangeResult result{status(), persistenceWarning};
+  return publishChangeResult(persistInstallation());
+}
+
+EnhancedModeChangeResult EnhancedModeManager::publishChangeResult(QString persistenceWarning) {
+  EnhancedModeChangeResult result{status(), std::move(persistenceWarning)};
   emit statusChanged(result.status);
+  // 同线程订阅者可能在 statusChanged 回调中启动身份代理，并通过
+  // setAgentState() 同步推进观测状态。返回值必须吸收这次合法的重入更新，
+  // 否则发起操作的对话框会用旧的 Unobserved 快照覆盖 Connecting。
+  result.status.agentState = m_agentState;
   return result;
 }
 
 EnhancedModeChangeResult EnhancedModeManager::start() {
   m_serviceControl.start();
-  EnhancedModeChangeResult result{status(), {}};
-  emit statusChanged(result.status);
-  return result;
+  return publishChangeResult({});
 }
 
 EnhancedModeChangeResult EnhancedModeManager::disable() {
@@ -400,9 +405,7 @@ EnhancedModeChangeResult EnhancedModeManager::disable() {
       persistenceWarning = QString::fromUtf8(error.what());
     }
   }
-  EnhancedModeChangeResult result{status(), persistenceWarning};
-  emit statusChanged(result.status);
-  return result;
+  return publishChangeResult(std::move(persistenceWarning));
 }
 
 void EnhancedModeManager::setAgentState(const EnhancedModeAgentState state) {

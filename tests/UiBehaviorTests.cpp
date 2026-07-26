@@ -583,7 +583,8 @@ void UiBehaviorTests::exclusionListButtonsFilterAndPersistenceRowsUseDisplayedSe
   QCOMPARE(files.pendingRemoved().size(), 2);
 
   uwf::ui::ExclusionListWidget registry(uwf::ui::ExclusionListWidget::Kind::Registry);
-  registry.setBaseline({}, {});
+  const QString stagingRegistryRoot = QStringLiteral("HKEY_LOCAL_MACHINE\\Software\\HsingYun\\UWF Manager");
+  registry.setBaseline({stagingRegistryRoot}, {stagingRegistryRoot});
   registry.setPersistBaseline(true, true, false, false);
   registry.resize(620, 320);
   registry.show();
@@ -597,6 +598,15 @@ void UiBehaviorTests::exclusionListButtonsFilterAndPersistenceRowsUseDisplayedSe
   auto* registryRemove = buttonWithText(&registry, QStringLiteral("Remove selected"));
   QVERIFY(registryList);
   QVERIFY(registryRemove);
+  bool stagingRegistryObserved = false;
+  for (int row = 0; row < registryList->count(); ++row) {
+    const auto* item = registryList->item(row);
+    if (item->data(Qt::UserRole).toString().compare(stagingRegistryRoot, Qt::CaseInsensitive) != 0) continue;
+    stagingRegistryObserved = true;
+    QVERIFY(item->toolTip().startsWith(QStringLiteral("Required by UWF for File staging.")));
+    QVERIFY(!item->toolTip().contains(QStringLiteral("Registry:")));
+  }
+  QVERIFY(stagingRegistryObserved);
   bool selectedTscal = false;
   for (int row = 0; row < registryList->count(); ++row) {
     if (registryList->item(row)->data(Qt::UserRole).toString().contains(QStringLiteral("TSCAL"))) {

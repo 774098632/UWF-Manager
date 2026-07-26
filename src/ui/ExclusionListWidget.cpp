@@ -866,10 +866,10 @@ void ExclusionListWidget::rebuild() {
       if (m_kind == Kind::File)
         tip += (fileEntryIsDir(entry) ? I18n::tr("Folder: %1") : I18n::tr("File: %1")).arg(full) + '\n';
       else {
-        tip += I18n::tr("Registry: %1").arg(full) + '\n';
-        if (isFileStagingRegistryRoot(full)) {
+        if (isFileStagingRegistryRoot(full))
           tip += I18n::tr("Required by UWF for File staging.") + '\n';
-        }
+        else
+          tip += I18n::tr("Registry: %1").arg(full) + '\n';
       }
     }
     // 头部（类型 + 路径 / 默认说明）与下面的会话状态之间空一行，做视觉分组。

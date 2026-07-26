@@ -157,7 +157,7 @@ void PowerController::executeReserved(const PowerAction action, FileStagingCoord
             UWF_LOG_I("power") << "automatic file staging prepared: files=" << filesToCommit;
             if (stagingTask->finished()) {
               const auto status = advanceStaging();
-              if (status.state == PowerStagingState::Failed) return PowerStagingFailure{std::move(status.failureDetails)};
+              if (status.state == PowerStagingState::Failed) return PowerStagingFailure{status.failureDetails};
               return PowerStagingNotRequired{};
             }
             return PowerStagingCommit{filesToCommit, advanceStaging};
@@ -246,6 +246,12 @@ void PowerController::executeWithCompletedStaging(const PowerAction action, File
 
 void PowerController::invokePowerAction(const PowerAction action) {
   using ControlResult = PowerControllerServices::PreshutdownControlResult;
+  // 先取得本次电源调用使用的权威对象状态，再把服务端跳过令牌的有效窗口
+  // 收窄到真正的关机/重启调用前。读取失败时根本不武装令牌；进程在调用前
+  // 异常终止时，服务误跳过自身 PRESHUTDOWN 提交的时间窗口也因此最小。
+  api::UwfFilter filter(m_session);
+  const auto row = filter.read();
+
   const ControlResult skipResult = m_preshutdown.markHandled ? m_preshutdown.markHandled() : ControlResult::NotApplicable;
   if (skipResult == ControlResult::Unacknowledged) {
     UWF_LOG_W("power") << "enhanced mode preshutdown skip token was not acknowledged; service fallback remains authoritative";
@@ -255,10 +261,6 @@ void PowerController::invokePowerAction(const PowerAction action) {
       UWF_LOG_W("power") << "enhanced mode preshutdown skip token revocation was not acknowledged";
     }
   });
-  // 提交文件可能持续一段时间。真正调用电源方法前重新读取 Filter，避免沿用
-  // 对话框打开前取得的对象身份和状态快照。
-  api::UwfFilter filter(m_session);
-  const auto row = filter.read();
   if (action == PowerAction::Shutdown)
     filter.shutdownSystem(row);
   else
