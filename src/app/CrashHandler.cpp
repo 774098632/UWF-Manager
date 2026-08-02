@@ -29,6 +29,7 @@
 #include <exception>
 #include <iterator>
 
+#include "../util/WindowsVersion.h"
 #include "uwf_version.h"
 #endif
 
@@ -51,7 +52,20 @@ wchar_t g_fallbackDirectory[kPathCapacity]{};
 wchar_t g_textPath[kPathCapacity]{};
 wchar_t g_dumpPath[kPathCapacity]{};
 wchar_t g_modulePath[kPathCapacity]{};
+char g_windowsVersion[64]{"unavailable"};
 volatile LONG g_crashStarted = 0;
+
+void initializeWindowsVersion() noexcept {
+  try {
+    const auto& version = windowsVersionInfo();
+    if (version.major == 0 && version.minor == 0 && version.build == 0) return;
+    (void)StringCchPrintfA(g_windowsVersion, std::size(g_windowsVersion), "%lu.%lu.%lu.%lu", static_cast<unsigned long>(version.major),
+                           static_cast<unsigned long>(version.minor), static_cast<unsigned long>(version.build),
+                           static_cast<unsigned long>(version.revision));
+  } catch (...) {
+    // CrashHandler 安装不得因系统版本元数据读取失败而中断。
+  }
+}
 
 void writeBytes(const HANDLE file, const char* const data, const DWORD size) {
   if (file == INVALID_HANDLE_VALUE || !data || size == 0) return;
@@ -234,9 +248,10 @@ void writeCrashArtifacts(EXCEPTION_POINTERS* const exceptionPointers) {
     char header[512]{};
     (void)StringCchPrintfA(header, std::size(header),
                            "UWF crash report\r\nversion=%s image_timestamp=0x%08lX image_size=0x%08lX\r\n"
+                           "windows_version=%s\r\n"
                            "exception=0x%08lX address=%p\r\nprocess=%lu thread=%lu\r\n",
                            UWF_VER_STRING, static_cast<unsigned long>(identity.timestamp), static_cast<unsigned long>(identity.size),
-                           static_cast<unsigned long>(exceptionCode), exceptionAddress, static_cast<unsigned long>(processId),
+                           g_windowsVersion, static_cast<unsigned long>(exceptionCode), exceptionAddress, static_cast<unsigned long>(processId),
                            static_cast<unsigned long>(threadId));
     writeText(textFile, header);
     writeStackTrace(textFile, exceptionPointers);
@@ -270,6 +285,7 @@ LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* const exceptionPointers
 }  // namespace
 
 void CrashHandler::install() {
+  initializeWindowsVersion();
   if (!initializeExecutableDirectory()) g_executableDirectory[0] = L'\0';
   (void)initializeFallbackDirectory();
 
