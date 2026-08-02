@@ -30,7 +30,11 @@ core::PendingChanges collectPending(const GlobalStatusPanel* global, const QVect
   changes.setOverlay = global->pendingOverlay();
 
   for (const auto& t : diskTabs) {
-    if (!t || !t->supported()) continue;
+    if (!t) continue;
+    // 文件暂存是立即持久化的，可能在注册表移除已排队后才发生变化。
+    // 在状态离开 UI、进入应用计划前再执行一次权威检查。
+    t->enforceFileStagingRemovalProtection();
+    if (!t->supported()) continue;
     const std::string dlStd = t->driveLetter().toStdString();
 
     if (auto v = t->pendingVolumeProtected()) changes.volumeProtect[dlStd] = *v;

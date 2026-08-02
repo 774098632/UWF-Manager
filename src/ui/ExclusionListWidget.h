@@ -20,6 +20,7 @@
 #include <QString>
 #include <QStringList>
 #include <QWidget>
+#include <functional>
 #include <optional>
 
 class QListWidget;
@@ -28,6 +29,7 @@ class QLineEdit;
 class QLabel;
 class QPushButton;
 class QAction;
+class QShowEvent;
 
 namespace uwf::app {
 class FileStagingConflictPolicy;
@@ -60,12 +62,20 @@ class ExclusionListWidget : public QWidget {
 
   [[nodiscard]] QStringList pendingAdded() const;
   [[nodiscard]] QStringList pendingRemoved() const;
+  // Registry kind 专用：在待应用状态边界重新检查文件暂存。若根排除项
+  // 已排队移除、但暂存列表后来又出现数据，丢弃该移除意图。
+  void enforceFileStagingRemovalProtection();
 
   // 两个持久化开关的待应用值：nullopt = 未改动，否则为用户期望的下次会话值。
   [[nodiscard]] std::optional<bool> pendingPersistDomainSecretKey() const;
   [[nodiscard]] std::optional<bool> pendingPersistTSCAL() const;
 
   void setReadOnly(bool ro);
+
+  // Registry kind 专用：注入“文件暂存是否存在数据”的实时只读探针。
+  // 当选区包含文件暂存注册表根且探针返回 true 时，禁止移除整个选区；
+  // 探针抛异常时同样按不可安全移除处理。调用方拥有探针捕获的对象。
+  void setFileStagingDataProbe(std::function<bool()> probe);
 
   // 文件列表右键"提交改动到磁盘"的总开关：仅当本卷当前会话存在活动覆盖层
   // （全局筛选器开 + 本卷当前会话受保护）时才为 true，由 DiskTab 每次快照后
@@ -82,6 +92,7 @@ class ExclusionListWidget : public QWidget {
     RejectedNotOnVolume,  // 仅 File：路径不在本卷
     RejectedForbidden,    // 触发 UWF 不允许排除的黑名单
     RejectedConflict,     // 与同一卷的文件暂存路径相交
+    RejectedRequired,     // Registry：文件暂存有数据时不得移除其持久化排除项
   };
   ImportOutcome importAdd(const QString& raw);
   ImportOutcome importRemove(const QString& raw);
@@ -103,6 +114,7 @@ class ExclusionListWidget : public QWidget {
 
  protected:
   bool eventFilter(QObject* obj, QEvent* ev) override;
+  void showEvent(QShowEvent* event) override;
 
  private:
   ExclusionListWidget(Kind kind, dialogs::FileDialogProvider& fileDialogs, app::FileStagingConflictPolicy* conflicts, QWidget* parent);
@@ -137,6 +149,13 @@ class ExclusionListWidget : public QWidget {
   [[nodiscard]] bool isPersistRow(const QString& entry) const;
   // Registry "添加" 菜单弹出前：已开启的开关项置灰。
   void updateAddMenuState();
+  // 根据只读状态、当前选区和文件暂存数据状态更新“移除所选”。
+  // 只读或选区含受保护的文件暂存注册表根时返回 false。
+  [[nodiscard]] bool canRemoveSelection() const;
+  // 实时查询持久化排除项是否必须保留。读取失败时 fail closed，
+  // 避免因诊断探针异常破坏文件暂存的跨会话持久性。
+  [[nodiscard]] bool fileStagingRegistryRootRequired() const;
+  void updateRemoveButtonState();
 
   Kind m_kind;
   dialogs::FileDialogProvider& m_fileDialogs;
@@ -163,6 +182,7 @@ class ExclusionListWidget : public QWidget {
   QAction* m_addTscalAct = nullptr;
   PersistFlag m_persistDomainSecretKey;
   PersistFlag m_persistTSCAL;
+  std::function<bool()> m_fileStagingDataProbe;
   bool m_readOnly = false;
   bool m_commitEnabled = false;
 };

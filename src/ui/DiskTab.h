@@ -85,6 +85,9 @@ class DiskTab : public QWidget {
   [[nodiscard]] QStringList pendingFileRemoved() const;
   [[nodiscard]] QStringList pendingRegAdded() const;
   [[nodiscard]] QStringList pendingRegRemoved() const;
+  // collectPending 调用：避免“先排队移除持久化排除项，后新增文件暂存”
+  // 绕过选择按钮的即时检查。
+  void enforceFileStagingRemovalProtection();
   // UWF_RegistryFilter 两个全局持久化开关的待应用值；nullopt = 未改动。
   [[nodiscard]] std::optional<bool> pendingPersistDomainSecretKey() const;
   [[nodiscard]] std::optional<bool> pendingPersistTSCAL() const;

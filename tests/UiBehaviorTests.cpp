@@ -523,7 +523,8 @@ void UiBehaviorTests::fileExclusionImportRejectsWrongVolumeAndUwfBlacklist() {
 void UiBehaviorTests::registryExclusionImportUsesTheSamePolicyAsTheUi() {
   using Outcome = uwf::ui::ExclusionListWidget::ImportOutcome;
   uwf::ui::ExclusionListWidget list(uwf::ui::ExclusionListWidget::Kind::Registry);
-  list.setBaseline({}, {QStringLiteral("HKLM\\SYSTEM\\Existing")});
+  const QString stagingRoot = QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\HsingYun\\UWF Manager");
+  list.setBaseline({}, {QStringLiteral("HKLM\\SYSTEM\\Existing"), stagingRoot});
 
   QCOMPARE(list.importAdd(QStringLiteral("hklm\\software\\Vendor\\Product")), Outcome::Applied);
   QCOMPARE(list.pendingAdded(), QStringList({QStringLiteral("HKEY_LOCAL_MACHINE\\software\\Vendor\\Product")}));
@@ -533,6 +534,22 @@ void UiBehaviorTests::registryExclusionImportUsesTheSamePolicyAsTheUi() {
 
   QCOMPARE(list.importRemove(QStringLiteral("hklm\\system\\existing")), Outcome::Applied);
   QCOMPARE(list.pendingRemoved(), QStringList({QStringLiteral("HKEY_LOCAL_MACHINE\\system\\existing")}));
+
+  bool stagingHasData = true;
+  list.setFileStagingDataProbe([&stagingHasData] { return stagingHasData; });
+  QCOMPARE(list.importRemove(stagingRoot), Outcome::RejectedRequired);
+  QCOMPARE(list.pendingRemoved(), QStringList({QStringLiteral("HKEY_LOCAL_MACHINE\\system\\existing")}));
+
+  // 先在空暂存状态排队移除，再添加暂存数据；待应用边界必须
+  // 永久丢弃根排除项的移除意图，不能在暂存再次清空后“复活”。
+  stagingHasData = false;
+  QCOMPARE(list.importRemove(stagingRoot), Outcome::Applied);
+  QVERIFY(list.pendingRemoved().contains(stagingRoot, Qt::CaseInsensitive));
+  stagingHasData = true;
+  list.enforceFileStagingRemovalProtection();
+  QVERIFY(!list.pendingRemoved().contains(stagingRoot, Qt::CaseInsensitive));
+  stagingHasData = false;
+  QVERIFY(!list.pendingRemoved().contains(stagingRoot, Qt::CaseInsensitive));
 }
 
 void UiBehaviorTests::exclusionListDoubleClickCopiesTheDisplayedFullPath() {
@@ -583,7 +600,9 @@ void UiBehaviorTests::exclusionListButtonsFilterAndPersistenceRowsUseDisplayedSe
   QCOMPARE(files.pendingRemoved().size(), 2);
 
   uwf::ui::ExclusionListWidget registry(uwf::ui::ExclusionListWidget::Kind::Registry);
-  const QString stagingRegistryRoot = QStringLiteral("HKEY_LOCAL_MACHINE\\Software\\HsingYun\\UWF Manager");
+  const QString stagingRegistryRoot = QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\HsingYun\\UWF Manager");
+  bool fileStagingHasData = true;
+  registry.setFileStagingDataProbe([&fileStagingHasData] { return fileStagingHasData; });
   registry.setBaseline({stagingRegistryRoot}, {stagingRegistryRoot});
   registry.setPersistBaseline(true, true, false, false);
   registry.resize(620, 320);
@@ -599,14 +618,26 @@ void UiBehaviorTests::exclusionListButtonsFilterAndPersistenceRowsUseDisplayedSe
   QVERIFY(registryList);
   QVERIFY(registryRemove);
   bool stagingRegistryObserved = false;
+  QListWidgetItem* stagingRegistryItem = nullptr;
   for (int row = 0; row < registryList->count(); ++row) {
-    const auto* item = registryList->item(row);
+    auto* item = registryList->item(row);
     if (item->data(Qt::UserRole).toString().compare(stagingRegistryRoot, Qt::CaseInsensitive) != 0) continue;
     stagingRegistryObserved = true;
+    stagingRegistryItem = item;
     QVERIFY(item->toolTip().startsWith(QStringLiteral("Required by UWF for File staging.")));
     QVERIFY(!item->toolTip().contains(QStringLiteral("Registry:")));
   }
   QVERIFY(stagingRegistryObserved);
+  QVERIFY(stagingRegistryItem);
+  stagingRegistryItem->setSelected(true);
+  QVERIFY(!registryRemove->isEnabled());
+  QTest::mouseClick(registryRemove, Qt::LeftButton);
+  QCOMPARE(registry.pendingRemoved().size(), 0);
+
+  fileStagingHasData = false;
+  registry.setFileStagingDataProbe([&fileStagingHasData] { return fileStagingHasData; });
+  QVERIFY(registryRemove->isEnabled());
+  registryList->clearSelection();
   bool selectedTscal = false;
   for (int row = 0; row < registryList->count(); ++row) {
     if (registryList->item(row)->data(Qt::UserRole).toString().contains(QStringLiteral("TSCAL"))) {

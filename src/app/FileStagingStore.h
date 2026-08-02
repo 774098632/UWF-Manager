@@ -27,8 +27,8 @@ enum class UwfCapability;
 
 namespace uwf::app {
 
-inline constexpr std::string_view kFileStagingRegistryRoot = R"(HKEY_LOCAL_MACHINE\Software\HsingYun\UWF Manager)";
-inline constexpr std::string_view kFileStagingRegistryKey = R"(HKEY_LOCAL_MACHINE\Software\HsingYun\UWF Manager\FileStaging)";
+inline constexpr std::string_view kFileStagingRegistryRoot = R"(HKEY_LOCAL_MACHINE\SOFTWARE\HsingYun\UWF Manager)";
+inline constexpr std::string_view kFileStagingRegistryKey = R"(HKEY_LOCAL_MACHINE\SOFTWARE\HsingYun\UWF Manager\FileStaging)";
 inline constexpr std::string_view kFileStagingEntriesValue = "Entries";
 
 // 文件暂存只依赖一份完整快照的读取与原子替换。UI 在内存副本上完成增删后一次
@@ -59,7 +59,7 @@ class RegistryFileStagingStore final : public FileStagingStore {
 };
 
 // 进程内唯一生产存储。注册表位置：
-// HKLM\Software\HsingYun\UWF Manager\FileStaging，值名 Entries。生产进程要求
+// HKLM\SOFTWARE\HsingYun\UWF Manager\FileStaging，值名 Entries。生产进程要求
 // 管理员权限，避免低完整性进程篡改随后会被提升权限提交的路径。
 RegistryFileStagingStore& registryFileStagingStore(WmiOperations& session, UwfCapability capability);
 

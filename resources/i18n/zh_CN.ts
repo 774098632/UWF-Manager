@@ -212,6 +212,10 @@
     </message>
     <message><source>The path overlaps an existing file staging entry</source><translation>路径与现有文件暂存项存在重叠</translation></message>
     <message>
+        <source>The registry exclusion is required while File staging contains saved entries</source>
+        <translation>文件暂存中存在已保存的条目时，必须保留该注册表排除项</translation>
+    </message>
+    <message>
         <source>The selected path does not exist or is not the expected file type:
 %1</source>
         <translation>所选路径不存在，或其类型与选择操作不符：
@@ -538,6 +542,14 @@ Next session: %2</source>
     </message>
     <message><source>About UWF Manager</source><translation>关于 UWF 管理器</translation></message>
     <message><source>System information</source><translation>系统信息</translation></message>
+    <message><source>Diagnostic snapshot</source><translation>诊断快照</translation></message>
+    <message>
+        <source>System, security, UWF, enhanced mode, and recent application logs.</source>
+        <translation>系统、安全、UWF、增强模式及近期应用日志。</translation>
+    </message>
+    <message><source>Read only</source><translation>只读</translation></message>
+    <message><source>Diagnostic report</source><translation>诊断报告</translation></message>
+    <message><source>Copied</source><translation>已复制</translation></message>
     <message>
         <source>View system, security, UWF, enhanced mode, and log diagnostics.</source>
         <translation>查看系统、安全、UWF、增强模式和日志诊断信息。</translation>
@@ -602,6 +614,10 @@ Canceled by user; %1 entries not processed.</source>
     <message><source>Page %1 / %2 · %3 entries total</source><translation>第 %1 / %2 页 · 共 %3 条</translation></message>
     <message><source>Copy selected rows</source><translation>复制选中行</translation></message>
     <message><source>Copy all</source><translation>复制全部</translation></message>
+    <message>
+        <source>This registry exclusion is required while File staging contains saved entries. Clear the File staging list before removing it.</source>
+        <translation>文件暂存中存在已保存的条目时必须保留此注册表排除项。请先清空文件暂存列表，再移除此项。</translation>
+    </message>
     <message><source>0 lines</source><translation>0 行</translation></message>
     <message><source>%1 lines</source><translation>共 %1 行</translation></message>
     <message><source>Loading log entries…</source><translation>正在加载日志…</translation></message>

@@ -227,6 +227,7 @@ DiskTab::DiskTab(const core::DiskInfo& disk, bool showRegistry, dialogs::FileDia
   // 看到一份完全相同的"注册表排除"列表而误解。
   if (m_showRegistry) {
     m_regs = new ExclusionListWidget(ExclusionListWidget::Kind::Registry, m_fileDialogs, this);
+    if (fileStagingStore) m_regs->setFileStagingDataProbe([fileStagingStore] { return !fileStagingStore->load().isEmpty(); });
     const int regIdx = m_infoTabs->addTab(m_regs, tm.icon(":/icons/registry.svg"), I18n::tr("Registry exclusions"));
     m_infoTabs->setTabToolTip(
         regIdx,
@@ -514,6 +515,9 @@ QStringList DiskTab::pendingFileAdded() const { return m_files->pendingAdded(); 
 QStringList DiskTab::pendingFileRemoved() const { return m_files->pendingRemoved(); }
 QStringList DiskTab::pendingRegAdded() const { return m_regs ? m_regs->pendingAdded() : QStringList(); }
 QStringList DiskTab::pendingRegRemoved() const { return m_regs ? m_regs->pendingRemoved() : QStringList(); }
+void DiskTab::enforceFileStagingRemovalProtection() {
+  if (m_regs) m_regs->enforceFileStagingRemovalProtection();
+}
 std::optional<bool> DiskTab::pendingPersistDomainSecretKey() const { return m_regs ? m_regs->pendingPersistDomainSecretKey() : std::nullopt; }
 std::optional<bool> DiskTab::pendingPersistTSCAL() const { return m_regs ? m_regs->pendingPersistTSCAL() : std::nullopt; }
 

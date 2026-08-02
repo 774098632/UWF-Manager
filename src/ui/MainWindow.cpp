@@ -825,7 +825,7 @@ void MainWindow::rebuildTabs(const std::vector<core::DiskInfo>& disks) {
     const auto& d = disks[i];
     const bool hostsRegistry = registryHostIndex && i == *registryHostIndex;
     DiskTab* tab = nullptr;
-    if (m_uwfCapability == UwfCapability::Available && core::supportsFileOverlayOperations(d.support)) {
+    if (m_uwfCapability == UwfCapability::Available && (core::supportsFileOverlayOperations(d.support) || hostsRegistry)) {
       tab = new DiskTab(d, hostsRegistry, dialogs::systemFileDialogs(), m_fileStaging, this);
     } else {
       tab = new DiskTab(d, hostsRegistry, dialogs::systemFileDialogs(), this);

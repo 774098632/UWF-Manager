@@ -67,6 +67,10 @@ ImportReportRow outcomeToRow(const api::UwfmgrCommand& c, ExclusionListWidget::I
       r.status = ImportReportRow::Status::Failed;
       r.detail = I18n::tr("The path overlaps an existing file staging entry");
       break;
+    case ExclusionListWidget::ImportOutcome::RejectedRequired:
+      r.status = ImportReportRow::Status::Failed;
+      r.detail = I18n::tr("The registry exclusion is required while File staging contains saved entries");
+      break;
   }
   return r;
 }

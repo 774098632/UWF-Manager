@@ -37,6 +37,7 @@
 #include <QPushButton>
 #include <QScreen>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QSizePolicy>
 #include <QVBoxLayout>
 #include <cmath>
@@ -370,6 +371,7 @@ ExclusionListWidget::ExclusionListWidget(Kind kind, dialogs::FileDialogProvider&
 
   connect(m_rmBtn, &QPushButton::clicked, this, &ExclusionListWidget::onRemove);
   connect(m_filter, &QLineEdit::textChanged, this, &ExclusionListWidget::onFilterChanged);
+  connect(m_list, &QListWidget::itemSelectionChanged, this, &ExclusionListWidget::updateRemoveButtonState);
   connect(m_list, &QListWidget::itemDoubleClicked, this, &ExclusionListWidget::onItemDoubleClicked);
   connect(&ThemeManager::instance(), &ThemeManager::themeChanged, this, [this](Theme) { refreshThemedIcons(); });
 
@@ -453,6 +455,13 @@ bool ExclusionListWidget::eventFilter(QObject* obj, QEvent* ev) {
     m_cornerOverlay->syncToParent();
   }
   return QWidget::eventFilter(obj, ev);
+}
+
+void ExclusionListWidget::showEvent(QShowEvent* event) {
+  QWidget::showEvent(event);
+  // 暂存列表可能在另一个内层或磁盘 TAB 中被清空；回到注册表页时重新执行
+  // 实时探针，不能沿用上次选区变化时缓存的按钮状态。
+  updateRemoveButtonState();
 }
 
 QString ExclusionListWidget::entryFullPath(const QListWidgetItem* item) const {
@@ -555,8 +564,21 @@ QStringList ExclusionListWidget::pendingAdded() const {
 
 QStringList ExclusionListWidget::pendingRemoved() const {
   auto l = m_removed.values();
+  // pending 可能在暂存列表为空时被排队，随后才由另一个 TAB
+  // 写入暂存数据。应用计划每次收集时必须重新查询权威存储，不能
+  // 信任选择按钮当时的状态。
+  if (fileStagingRegistryRootRequired()) l.removeIf([](const QString& key) { return isFileStagingRegistryRoot(key); });
   sortList(l);
   return l;
+}
+
+void ExclusionListWidget::enforceFileStagingRemovalProtection() {
+  if (!fileStagingRegistryRootRequired()) return;
+  const QString root = QString::fromLatin1(app::kFileStagingRegistryRoot.data(), static_cast<qsizetype>(app::kFileStagingRegistryRoot.size()));
+  if (!setContainsCI(m_removed, root)) return;
+
+  setRemoveCI(m_removed, root);
+  rebuild();
 }
 
 std::optional<bool> ExclusionListWidget::pendingPersistDomainSecretKey() const { return m_persistDomainSecretKey.pendingNext; }
@@ -568,6 +590,12 @@ void ExclusionListWidget::setReadOnly(bool ro) {
   m_list->setEnabled(!ro);
   const auto buttons = findChildren<QPushButton*>();
   for (auto* btn : buttons) btn->setEnabled(!ro);
+  updateRemoveButtonState();
+}
+
+void ExclusionListWidget::setFileStagingDataProbe(std::function<bool()> probe) {
+  m_fileStagingDataProbe = std::move(probe);
+  updateRemoveButtonState();
 }
 
 void ExclusionListWidget::setCommitEnabled(bool enabled) { m_commitEnabled = enabled; }
@@ -703,6 +731,10 @@ ExclusionListWidget::ImportOutcome ExclusionListWidget::importRemove(const QStri
   else
     p = normRegKey(p);
 
+  // 导入命令不经过列表选区和“移除所选”按钮，因此必须在
+  // 状态写入边界单独执行同一持久性约束。
+  if (m_kind == Kind::Registry && isFileStagingRegistryRoot(p) && fileStagingRegistryRootRequired()) return ImportOutcome::RejectedRequired;
+
   // 镜像 onRemove 的状态机：若条目还在 m_added → 撤销 add；
   // 否则若它在 m_next 基线里 → 标 removed。其余情况都属于 NoOp。
   bool changed = false;
@@ -721,7 +753,8 @@ ExclusionListWidget::ImportOutcome ExclusionListWidget::importRemove(const QStri
 }
 
 void ExclusionListWidget::onRemove() {
-  if (m_readOnly) return;
+  updateRemoveButtonState();
+  if (!m_rmBtn->isEnabled()) return;
   const auto selected = m_list->selectedItems();
   for (auto* it : selected) {
     const QString text = it->data(Qt::UserRole).toString();
@@ -889,6 +922,7 @@ void ExclusionListWidget::rebuild() {
   m_summary->setText(I18n::tr("%1 entries · %2 to add · %3 to remove in next session · %4 pending").arg(display.size()).arg(added).arg(removed).arg(changed));
 
   onFilterChanged(m_filter->text());
+  updateRemoveButtonState();
 }
 
 void ExclusionListWidget::enablePersistFlag(PersistFlag& flag) {
@@ -910,6 +944,38 @@ void ExclusionListWidget::updateAddMenuState() {
   // 已经（含待应用）开启的开关，"开启 X"项置灰——要关闭只能在列表里移除。
   if (m_addDomainSecretAct) m_addDomainSecretAct->setEnabled(!m_persistDomainSecretKey.effectiveNext());
   if (m_addTscalAct) m_addTscalAct->setEnabled(!m_persistTSCAL.effectiveNext());
+}
+
+bool ExclusionListWidget::canRemoveSelection() const {
+  if (m_readOnly) return false;
+  if (m_kind != Kind::Registry || !m_fileStagingDataProbe) return true;
+
+  const bool stagingRootSelected =
+      std::ranges::any_of(m_list->selectedItems(), [this](const QListWidgetItem* item) { return item && isFileStagingRegistryRoot(entryFullPath(item)); });
+  if (!stagingRootSelected) return true;
+
+  return !fileStagingRegistryRootRequired();
+}
+
+bool ExclusionListWidget::fileStagingRegistryRootRequired() const {
+  if (m_kind != Kind::Registry || !m_fileStagingDataProbe) return false;
+  try {
+    return m_fileStagingDataProbe();
+  } catch (...) {
+    return true;
+  }
+}
+
+void ExclusionListWidget::updateRemoveButtonState() {
+  if (!m_rmBtn) return;
+  const bool removable = canRemoveSelection();
+  m_rmBtn->setEnabled(removable);
+  if (!removable && !m_readOnly) {
+    m_rmBtn->setToolTip(
+        I18n::tr("This registry exclusion is required while File staging contains saved entries. Clear the File staging list before removing it."));
+  } else {
+    m_rmBtn->setToolTip(I18n::tr("Remove the selected entries from the exclusion list. Takes effect after Apply."));
+  }
 }
 
 }  // namespace uwf::ui

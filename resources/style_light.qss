@@ -403,6 +403,13 @@ QPushButton#primaryBtn:disabled {
     border-color: #B8CDF8;
 }
 
+/* 与 dark 主题同理：覆盖 #dangerBtn 的正常红色，明确表达不可操作。 */
+QPushButton#dangerBtn:disabled {
+    background: #F1F3F4;
+    color: #BDC1C6;
+    border-color: #E8EAED;
+}
+
 QPushButton#enhancedModeChangeButton[actionStyle="enable"] {
     background: #18864B;
     color: #FFFFFF;

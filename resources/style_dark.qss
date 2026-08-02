@@ -405,6 +405,14 @@ QPushButton#primaryBtn:disabled {
     border-color: #2F4970;
 }
 
+/* dangerBtn 的 ID 选择器比通用 QPushButton:disabled 优先级高，必须用同等
+   specificity 显式覆盖，否则按钮虽已 disabled，视觉上仍保持正常红色。 */
+QPushButton#dangerBtn:disabled {
+    background: #1F2226;
+    color: #5C6168;
+    border-color: #2A2D33;
+}
+
 QPushButton#enhancedModeChangeButton[actionStyle="enable"] {
     background: #18794E;
     color: #FFFFFF;

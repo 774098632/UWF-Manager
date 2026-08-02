@@ -2222,6 +2222,8 @@ void ApplicationUiBehaviorTests::mainWindowMountsFileStagingOnlyWherePerFileComm
   source.disks = {{dataDrive, "Volume{data}", "NTFS", "Removable data", 1000, 500, core::DiskSupport::NotFixedLocalDisk},
                   {systemDrive, "Volume{system}", "NTFS", "System", 1000, 500, core::DiskSupport::Supported}};
   source.snapshot = editableSnapshot();
+  const QString stagingRegistryRoot = QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\HsingYun\\UWF Manager");
+  source.snapshot.next.registryExclusions.push_back(stagingRegistryRoot.toStdString());
 
   ui::MainWindow window({wmi, source, staging},
                         {.uwfCapability = UwfCapability::Available, .compatibilityMode = false, .osProductName = {}, .osEditionId = {}});
@@ -2243,6 +2245,21 @@ void ApplicationUiBehaviorTests::mainWindowMountsFileStagingOnlyWherePerFileComm
   QCOMPARE(systemInnerTabs->count(), 3);
   QCOMPARE(systemInnerTabs->tabText(1), QStringLiteral("Registry exclusions"));
   QCOMPARE(systemInnerTabs->tabText(2), QStringLiteral("File staging"));
+
+  auto* registryExclusions = qobject_cast<ui::ExclusionListWidget*>(systemInnerTabs->widget(1));
+  QVERIFY(registryExclusions);
+  auto* registryList = registryExclusions->findChild<QListWidget*>(QStringLiteral("exclusionList"));
+  auto* registryRemove = buttonWithText(registryExclusions, QStringLiteral("Remove selected"));
+  QVERIFY(registryList && registryRemove);
+  bool selectedStagingRoot = false;
+  for (int row = 0; row < registryList->count(); ++row) {
+    auto* item = registryList->item(row);
+    if (item->data(Qt::UserRole).toString().compare(stagingRegistryRoot, Qt::CaseInsensitive) != 0) continue;
+    item->setSelected(true);
+    selectedStagingRoot = true;
+  }
+  QVERIFY(selectedStagingRoot);
+  QVERIFY(!registryRemove->isEnabled());
 
   auto* systemStaging = qobject_cast<ui::FileStagingWidget*>(systemInnerTabs->widget(2));
   QVERIFY(systemStaging);

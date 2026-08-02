@@ -58,7 +58,9 @@ class ThemedSvgIconEngine : public QIconEngine {
  public:
   explicit ThemedSvgIconEngine(QByteArray svgBytes, Qt::Alignment align) : m_bytes(std::move(svgBytes)), m_align(align) {}
 
-  void paint(QPainter* painter, const QRect& rect, QIcon::Mode, QIcon::State) override {
+  void paint(QPainter* painter, const QRect& rect, const QIcon::Mode mode, QIcon::State) override {
+    painter->save();
+    if (mode == QIcon::Disabled) painter->setOpacity(painter->opacity() * 0.38);
     QSvgRenderer r(m_bytes);
     // 字形按"较短边"渲染成正方形（不拉伸变形），在 rect 内按 m_align 摆放，多出的宽度
     // 留作透明边。iconSize 为正方形时填满整块、与原行为完全一致。把 iconSize 调宽（高
@@ -72,6 +74,7 @@ class ThemedSvgIconEngine : public QIconEngine {
       x = rect.right() - side + 1;
     const int y = rect.y() + (rect.height() - side) / 2;
     r.render(painter, QRectF(x, y, side, side));
+    painter->restore();
   }
 
   QPixmap pixmap(const QSize& size, QIcon::Mode mode, QIcon::State state) override {
