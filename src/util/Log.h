@@ -28,6 +28,7 @@
 // 采用 streaming 风格是为了在调用端保留跨类型拼接的便利；
 // 如果只是格式化一段字符串，优先用 std::format 再把结果传进来。
 
+#include <cstddef>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -42,6 +43,9 @@ void logLine(char level, std::string_view category, std::string_view message);
 
 // 拷贝一份当前所有日志行（从最旧到最新）。线程安全。
 std::vector<std::string> recentLogLines();
+// 只拷贝最新的 maxLines 行（仍按从旧到新排列），且每行最多复制
+// maxBytesPerLine 字节。该预算独立于日志环形缓冲容量。
+std::vector<std::string> recentLogLines(std::size_t maxLines, std::size_t maxBytesPerLine);
 
 // 清空缓冲区。线程安全。由 UI "Clear" 按钮触发。
 void clearLogLines();

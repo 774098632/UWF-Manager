@@ -406,7 +406,7 @@ void OverlayHubView::execute(const Action action) {
     case Action::ScheduleRecoverRetry: {
       ++m_consecutiveFailures;
       if (m_consecutiveFailures > maxExclusiveRecoverAttempts()) {
-        UWF_LOG_D("hub") << "recovery exhausted: view=" << metaObject()->className() << " failures=" << m_consecutiveFailures << " action=yield-fallback";
+        UWF_LOG_W("hub") << "recovery exhausted: view=" << metaObject()->className() << " failures=" << m_consecutiveFailures << " action=yield-fallback";
         postEvent(Event::plain(EventType::ReleaseBlocked));
         beginPresentationRelease(ReleaseReason::Recovery);
         return;
@@ -474,12 +474,18 @@ void OverlayHubView::enterState(const DisplayState state) {
 }
 
 void OverlayHubView::logOutcome(const Event& event) const {
-  if ((event.type == EventType::AttachFinished && event.attachResult != AttachResult::Prepared) ||
-      (event.type == EventType::ActivationFinished && event.attachResult != AttachResult::Attached))
-    UWF_LOG_D("hub") << "attach outcome: view=" << metaObject()->className() << " result=" << attachResultName(event.attachResult);
+  const bool unexpectedAttach = (event.type == EventType::AttachFinished && event.attachResult != AttachResult::Prepared) ||
+                                (event.type == EventType::ActivationFinished && event.attachResult != AttachResult::Attached);
+  if (unexpectedAttach) {
+    const bool normallyRetained = event.attachResult == AttachResult::Retained && m_displayState == DisplayState::Refreshing;
+    if (normallyRetained)
+      UWF_LOG_I("hub") << "attach outcome: view=" << metaObject()->className() << " result=" << attachResultName(event.attachResult);
+    else
+      UWF_LOG_W("hub") << "attach outcome: view=" << metaObject()->className() << " result=" << attachResultName(event.attachResult);
+  }
   if (event.type == EventType::VerificationObserved &&
       (event.verificationResult == VerificationResult::RefreshRequired || event.verificationResult == VerificationResult::Invalid))
-    UWF_LOG_D("hub") << "verification outcome: view=" << metaObject()->className() << " state=" << displayStateName(m_displayState)
+    UWF_LOG_W("hub") << "verification outcome: view=" << metaObject()->className() << " state=" << displayStateName(m_displayState)
                      << " result=" << verificationResultName(event.verificationResult);
 }
 

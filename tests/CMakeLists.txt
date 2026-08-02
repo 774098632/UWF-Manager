@@ -134,6 +134,7 @@ qt_add_executable(UwfApplicationUiBehaviorTests
         ../src/core/RegistryExclusionPolicy.cpp
         ../src/core/UwfModel.cpp
         ../src/ui/AboutDialog.cpp
+        ../src/ui/SystemInformationDialog.cpp
         ../src/ui/ApplyPlanDialog.cpp
         ../src/ui/CommitReportDialog.cpp
         ../src/ui/Dialogs.cpp
@@ -167,6 +168,8 @@ qt_add_executable(UwfApplicationUiBehaviorTests
         ../src/ui/OverlayHubFactory.cpp
         ../src/ui/OverlayPresentationController.cpp
         ../src/ui/SystemInfoProvider.cpp
+        ../src/ui/DiagnosticReportProvider.cpp
+        ../src/ui/ProcessTokenDiagnostics.cpp
         ../src/ui/TrayController.cpp
         ../src/ui/TransientLabel.cpp
         ../src/ui/WindowChromeController.cpp

@@ -53,6 +53,7 @@
 #include "../uwf/api/UwfmgrCli.h"
 #include "AboutDialog.h"
 #include "ApplyPlanDialog.h"
+#include "DiagnosticReportProvider.h"
 #include "Dialogs.h"
 #include "DiskTab.h"
 #include "EnhancedModeDialog.h"
@@ -988,7 +989,12 @@ void MainWindow::showImport() {
 }
 
 void MainWindow::showAbout() {
-  AboutDialog dlg(this);
+  AboutDialog dlg(
+      [this] {
+        return DiagnosticReportProvider::diagnosticText(DiagnosticReportProvider::capture(
+            m_uwfCapability, m_hasCommittedState ? &m_snapshot : nullptr, m_enhancedModeManager ? &m_enhancedModeStatus : nullptr, m_compatibilityMode));
+      },
+      this);
   dlg.exec();
 }
 

@@ -167,11 +167,13 @@ void Win11TaskbarLayoutStrategy::recordVerificationDiagnostic(const Verification
   if (m_impl->lastDiagnosticResult == result && m_impl->lastDiagnosticReason == currentReason) return;
   m_impl->lastDiagnosticResult = result;
   m_impl->lastDiagnosticReason = currentReason;
-  UWF_LOG_D("taskbar") << "verification observed: result="
-                       << (result == VerificationResult::Retained          ? "retained"
-                           : result == VerificationResult::RefreshRequired ? "refresh-required"
-                                                                           : "invalid")
-                       << " reason=" << currentReason;
+  const char* const resultName = result == VerificationResult::Retained          ? "retained"
+                                 : result == VerificationResult::RefreshRequired ? "refresh-required"
+                                                                                 : "invalid";
+  if (result == VerificationResult::Retained)
+    UWF_LOG_I("taskbar") << "verification observed: result=" << resultName << " reason=" << currentReason;
+  else
+    UWF_LOG_W("taskbar") << "verification observed: result=" << resultName << " reason=" << currentReason;
 }
 
 std::unique_ptr<TaskbarLayoutStrategy::AttachTransaction> Win11TaskbarLayoutStrategy::prepareAttach(QWindow* window, const QSize& logicalSize) {
@@ -287,7 +289,7 @@ TaskbarLayoutStrategy::AttachResult Win11TaskbarLayoutStrategy::AttachTransactio
   const AttachResult injectedState = classifyInjectedState(observation, m_owner->m_impl->layeredChildCapabilityConfirmed);
   if (injectedState == AttachResult::Incompatible) return injectedState;
   if (injectedState != AttachResult::Attached) {
-    UWF_LOG_D("taskbar") << "attachment finalization rejected: parent=" << observation.parentMatches << " child=" << observation.child
+    UWF_LOG_W("taskbar") << "attachment finalization rejected: parent=" << observation.parentMatches << " child=" << observation.child
                          << " popup=" << observation.popup << " layered=" << observation.layered << " toolWindow=" << observation.toolWindow
                          << " noActivate=" << observation.noActivate << " appWindow=" << observation.appWindow;
     return hardReset("finalize-invariant");
@@ -417,10 +419,10 @@ TaskbarLayoutStrategy::AttachResult Win11TaskbarLayoutStrategy::abortIncompleteP
   // 重试；任一项失败由 detach() hard-reset 销毁窗口，绝不能留下半注入状态。
   const DetachResult detached = detach();
   if (detached == DetachResult::Detached) {
-    UWF_LOG_D("taskbar") << "parent transaction deferred: reason=qt-parent-mismatch action=rollback-and-retry";
+    UWF_LOG_I("taskbar") << "parent transaction deferred: reason=qt-parent-mismatch action=rollback-and-retry";
     return AttachResult::TemporarilyUnavailable;
   }
-  UWF_LOG_D("taskbar") << "parent transaction aborted: reason=qt-parent-mismatch action=destroy-and-recreate";
+  UWF_LOG_W("taskbar") << "parent transaction aborted: reason=qt-parent-mismatch action=destroy-and-recreate";
   return AttachResult::Invalid;
 }
 

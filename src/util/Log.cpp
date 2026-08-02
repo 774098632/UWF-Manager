@@ -16,9 +16,12 @@
  */
 #include "Log.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <deque>
 #include <format>
+#include <iterator>
 #include <mutex>
 
 namespace uwf {
@@ -82,6 +85,28 @@ std::vector<std::string> recentLogLines() {
   LogState& s = state();
   std::lock_guard<std::mutex> lk(s.mutex);
   return {s.buffer.begin(), s.buffer.end()};
+}
+
+std::vector<std::string> recentLogLines(const std::size_t maxLines, const std::size_t maxBytesPerLine) {
+  LogState& s = state();
+  std::lock_guard<std::mutex> lk(s.mutex);
+  const std::size_t count = std::min(maxLines, s.buffer.size());
+  const auto first = std::next(s.buffer.cend(), -static_cast<std::ptrdiff_t>(count));
+  std::vector<std::string> result;
+  result.reserve(count);
+  constexpr std::string_view kTruncatedSuffix = "... <truncated>";
+  for (auto current = first; current != s.buffer.cend(); ++current) {
+    if (current->size() <= maxBytesPerLine) {
+      result.push_back(*current);
+    } else if (maxBytesPerLine > kTruncatedSuffix.size()) {
+      std::string line = current->substr(0, maxBytesPerLine - kTruncatedSuffix.size());
+      line.append(kTruncatedSuffix);
+      result.push_back(std::move(line));
+    } else {
+      result.push_back(current->substr(0, maxBytesPerLine));
+    }
+  }
+  return result;
 }
 
 void clearLogLines() {

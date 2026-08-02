@@ -64,6 +64,7 @@
 #include "ui/ApplyPlanDialog.h"
 #include "ui/CommitBatch.h"
 #include "ui/CommitDispatcher.h"
+#include "ui/DiagnosticReportProvider.h"
 #include "ui/Dialogs.h"
 #include "ui/DiskTab.h"
 #include "ui/EnhancedModeDialog.h"
@@ -87,6 +88,7 @@
 #include "uwf/FileStagingCommitter.h"
 #include "uwf/FileStagingTask.h"
 #include "uwf/RegistryTreeCommitter.h"
+#include "uwf/UwfSnapshot.h"
 #include "uwf/api/UwfmgrCli.h"
 #include "uwf/wmi/WmiError.h"
 #include "uwf/wmi/WmiException.h"
@@ -365,6 +367,7 @@ class ApplicationUiBehaviorTests final : public QObject {
   void cleanupTestCase();
   void languageAndThemeChangesReachProductionWidgets();
   void aboutDialogExposesVersionLicenseAndSafeClose();
+  void diagnosticReportDistinguishesMissingStateAndBoundsLogs();
   void commonDialogsPreserveSafeDefaultsAndPreviewPagination();
   void logBufferAndViewerPreserveMalformedAndStructuredLines();
   void marqueeAndUsageWidgetsHandleEmptyOverflowAndThresholdEdges();
@@ -455,12 +458,46 @@ void ApplicationUiBehaviorTests::aboutDialogExposesVersionLicenseAndSafeClose() 
   QVERIFY(hasVersion);
   QVERIFY(hasLicense);
   QVERIFY(hasSourceLink);
+  QVERIFY(buttonWithText(&dialog, QStringLiteral("System information")));
   auto* close = buttonWithText(&dialog, QStringLiteral("Close"));
   QVERIFY(close);
   QSignalSpy finished(&dialog, &QDialog::finished);
   QTest::mouseClick(close, Qt::LeftButton);
   QCOMPARE(finished.count(), 1);
   QCOMPARE(finished.at(0).at(0).toInt(), static_cast<int>(QDialog::Accepted));
+}
+
+void ApplicationUiBehaviorTests::diagnosticReportDistinguishesMissingStateAndBoundsLogs() {
+  clearLogLines();
+  const QString missingReport = ui::DiagnosticReportProvider::diagnosticText({});
+  QVERIFY(missingReport.contains(QStringLiteral("snapshot.available = no")));
+  QVERIFY(!missingReport.contains(QStringLiteral("user.account = <empty>")));
+  QVERIFY(!missingReport.contains(QStringLiteral("user.sid = <empty>")));
+  QVERIFY(missingReport.contains(QStringLiteral("user.account = ")) || missingReport.contains(QStringLiteral("user.account.error = ")) ||
+          missingReport.contains(QStringLiteral("user.error = ")));
+  QVERIFY(missingReport.contains(QStringLiteral("user.sid = ")) || missingReport.contains(QStringLiteral("user.sid.error = ")) ||
+          missingReport.contains(QStringLiteral("user.error = ")));
+  QVERIFY(missingReport.contains(QStringLiteral("integrity.level = ")) || missingReport.contains(QStringLiteral("integrity.error = ")));
+
+  const core::UwfSnapshot snapshot = editableSnapshot();
+  const service::EnhancedModeStatus enhancedMode = completeEnhancedModeStatus();
+  const auto context = ui::DiagnosticReportProvider::capture(UwfCapability::Available, &snapshot, &enhancedMode, true);
+  QString report = ui::DiagnosticReportProvider::diagnosticText(context);
+  QVERIFY(report.contains(QStringLiteral("snapshot.available = yes")));
+  QVERIFY(report.contains(QStringLiteral("current.filter.enabled = yes")));
+  QVERIFY(report.contains(QStringLiteral("next.overlay.type = disk")));
+  QVERIFY(report.contains(QStringLiteral("service.contract_satisfied = yes")));
+
+  clearLogLines();
+  logLine('I', "diagnostic-test", "diagnostic-oldest-marker");
+  for (int index = 0; index < 68; ++index) logLine('I', "diagnostic-test", "diagnostic-middle-" + std::to_string(index));
+  logLine('W', "diagnostic-test", "diagnostic-newest-marker-" + std::string(2048, 'x'));
+  report = ui::DiagnosticReportProvider::diagnosticText(context);
+  QVERIFY(report.contains(QStringLiteral("lines.count = 64")));
+  QVERIFY(!report.contains(QStringLiteral("diagnostic-oldest-marker")));
+  QVERIFY(report.contains(QStringLiteral("diagnostic-newest-marker")));
+  QVERIFY(report.contains(QStringLiteral("... <truncated>")));
+  clearLogLines();
 }
 
 void ApplicationUiBehaviorTests::commonDialogsPreserveSafeDefaultsAndPreviewPagination() {

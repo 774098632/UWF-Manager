@@ -23,14 +23,25 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <exception>
+#include <utility>
 
+#include "DiagnosticReportProvider.h"
 #include "I18n.h"
+#include "SystemInformationDialog.h"
 #include "ThemeManager.h"
 #include "uwf_version.h"
 
 namespace uwf::ui {
 
-AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
+AboutDialog::AboutDialog(QWidget* parent) : AboutDialog([] { return DiagnosticReportProvider::diagnosticText({}); }, parent) {}
+
+AboutDialog::AboutDialog(std::function<QString()> systemInformationProvider, QWidget* parent)
+    : QDialog(parent), m_systemInformationProvider(std::move(systemInformationProvider)) {
+  buildUi();
+}
+
+void AboutDialog::buildUi() {
   // 改用普通 QDialog 而非 QMessageBox：QMessageBox 内部 label 走另一条
   // 字体路径，全局 app.setFont() 设置的 hinting / styleStrategy 不会传播过去，
   // 中文渲染会"糊"。QDialog + QLabel 跟其它对话框一样能继承 app font。
@@ -132,6 +143,21 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
   layout->addWidget(uwfNote);
 
   auto* btns = new QDialogButtonBox(this);
+  auto* systemInfoBtn = btns->addButton(I18n::tr("System information"), QDialogButtonBox::ActionRole);
+  systemInfoBtn->setObjectName(QStringLiteral("aboutSystemInformationButton"));
+  systemInfoBtn->setToolTip(I18n::tr("View system, security, UWF, enhanced mode, and log diagnostics."));
+  connect(systemInfoBtn, &QPushButton::clicked, this, [this] {
+    QString report;
+    try {
+      report = m_systemInformationProvider ? m_systemInformationProvider() : DiagnosticReportProvider::diagnosticText({});
+    } catch (const std::exception& error) {
+      report = QStringLiteral("UWF Manager diagnostic report\n\n[Collection failure]\n%1").arg(QString::fromUtf8(error.what()));
+    } catch (...) {
+      report = QStringLiteral("UWF Manager diagnostic report\n\n[Collection failure]\nUnknown error");
+    }
+    SystemInformationDialog dialog(std::move(report), this);
+    dialog.exec();
+  });
   auto* closeBtn = btns->addButton(I18n::tr("Close"), QDialogButtonBox::AcceptRole);
   connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
   layout->addWidget(btns);

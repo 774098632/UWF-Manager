@@ -16,25 +16,17 @@
  */
 #pragma once
 
-// "About UWF Manager" 对话框：logo + 标题 + 版本号 + GPL / UWF 说明，并提供
-// 系统信息入口。诊断报告由调用方注入，关于窗口只负责展示和打开详情窗口。
-
 #include <QDialog>
 #include <QString>
-#include <functional>
 
 namespace uwf::ui {
 
-class AboutDialog : public QDialog {
+// 只读诊断报告窗口。报告采用稳定的英文 key，便于用户直接复制到 issue，
+// 而窗口标题、提示与按钮仍跟随界面语言。
+class SystemInformationDialog final : public QDialog {
   Q_OBJECT
  public:
-  explicit AboutDialog(QWidget* parent = nullptr);
-  AboutDialog(std::function<QString()> systemInformationProvider, QWidget* parent);
-
- private:
-  void buildUi();
-
-  std::function<QString()> m_systemInformationProvider;
+  explicit SystemInformationDialog(QString report, QWidget* parent = nullptr);
 };
 
 }  // namespace uwf::ui

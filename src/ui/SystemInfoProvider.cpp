@@ -18,6 +18,7 @@
 
 #include <QStringList>
 #include <cstdint>
+#include <vector>
 
 #include "../util/SystemHardwareInfo.h"
 #include "../util/WindowsVersion.h"

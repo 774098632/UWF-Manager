@@ -833,6 +833,24 @@ void CoreBehaviorTests::logBufferPreservesOrderAndOversizedTail() {
   lines = uwf::recentLogLines();
   QCOMPARE(lines.size(), std::size_t{1});
   QVERIFY(lines.front().ends_with(oversized));
+
+  auto bounded = uwf::recentLogLines(64, 1024);
+  QCOMPARE(bounded.size(), std::size_t{1});
+  QVERIFY(bounded.front().size() <= std::size_t{1024});
+  QVERIFY(bounded.front().ends_with("... <truncated>"));
+
+  uwf::clearLogLines();
+  for (int index = 0; index < 70; ++index) {
+    const std::string message = "bounded-entry-" + std::to_string(index) + "-" + std::string(256, 'x');
+    uwf::logLine('I', "bounded", message);
+  }
+  bounded = uwf::recentLogLines(64, 80);
+  QCOMPARE(bounded.size(), std::size_t{64});
+  QVERIFY(bounded.front().find("bounded-entry-6-") != std::string::npos);
+  QVERIFY(bounded.back().find("bounded-entry-69-") != std::string::npos);
+  QVERIFY(std::ranges::all_of(bounded, [](const std::string& line) { return line.size() <= std::size_t{80}; }));
+  QVERIFY(std::ranges::all_of(bounded, [](const std::string& line) { return line.ends_with("... <truncated>"); }));
+
   uwf::clearLogLines();
   QVERIFY(uwf::recentLogLines().empty());
 }

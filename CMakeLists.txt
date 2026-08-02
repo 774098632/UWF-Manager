@@ -144,6 +144,8 @@ set(UWF_SOURCES
         src/ui/MainWindow.cpp
         src/ui/AboutDialog.h
         src/ui/AboutDialog.cpp
+        src/ui/SystemInformationDialog.h
+        src/ui/SystemInformationDialog.cpp
         src/ui/CommitDispatcher.h
         src/ui/CommitDispatcher.cpp
         src/ui/EnhancedModeDialog.h
@@ -167,6 +169,10 @@ set(UWF_SOURCES
         src/ui/TransientLabel.cpp
         src/ui/SystemInfoProvider.h
         src/ui/SystemInfoProvider.cpp
+        src/ui/DiagnosticReportProvider.h
+        src/ui/DiagnosticReportProvider.cpp
+        src/ui/ProcessTokenDiagnostics.h
+        src/ui/ProcessTokenDiagnostics.cpp
         src/ui/HoverHintController.h
         src/ui/HoverHintController.cpp
         src/ui/WindowChromeController.h

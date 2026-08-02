@@ -383,6 +383,10 @@ class OverlayHubViewTestAccess {
   static void fireConfirmationDue(OverlayHubView& view) { view.postEvent(OverlayHubView::Event::plain(OverlayHubView::EventType::ConfirmationDue)); }
   static void fireHealthDue(OverlayHubView& view) { view.postEvent(OverlayHubView::Event::plain(OverlayHubView::EventType::HealthDue)); }
   static void fireExternalRefresh(OverlayHubView& view) { view.postEvent(OverlayHubView::Event::plain(OverlayHubView::EventType::ExternalRefresh)); }
+  static void logAttachOutcome(OverlayHubView& view, const OverlayHubView::DisplayState state, const OverlayHubView::AttachResult result) {
+    view.m_displayState = state;
+    view.logOutcome(OverlayHubView::Event::attachFinished(result));
+  }
 
  private:
   [[nodiscard]] static OverlayHubView::Event eventFor(const Variant variant) {
@@ -1519,6 +1523,26 @@ void testHubLifecycleDiagnostics() {
 #endif
 }
 
+void testRetainedAttachDiagnosticMatchesStateSemantics() {
+  const auto containsLevel = [](const std::vector<std::string>& lines, const char level) {
+    const std::string marker = std::string(" ") + level + " hub]";
+    return std::ranges::any_of(
+        lines, [&](const std::string& line) { return line.find(marker) != std::string::npos && line.find("result=retained") != std::string::npos; });
+  };
+
+  FakeHubView view(200);
+  uwf::clearLogLines();
+  OverlayHubViewTestAccess::logAttachOutcome(view, OverlayHubView::DisplayState::Refreshing, OverlayHubView::AttachResult::Retained);
+  auto lines = uwf::recentLogLines();
+  QVERIFY2(containsLevel(lines, 'I') && !containsLevel(lines, 'W'), "Refreshing/Retained must be an informational successful retention");
+
+  uwf::clearLogLines();
+  OverlayHubViewTestAccess::logAttachOutcome(view, OverlayHubView::DisplayState::Attaching, OverlayHubView::AttachResult::Retained);
+  lines = uwf::recentLogLines();
+  QVERIFY2(containsLevel(lines, 'W') && !containsLevel(lines, 'I'), "Retained outside Refreshing enters recovery and must remain a warning");
+  uwf::clearLogLines();
+}
+
 void testOverlayViewStateMachineMatrix() {
   const int stateCount = OverlayHubViewTestAccess::stateCount();
   for (int state = 0; state < stateCount; ++state) {
@@ -2419,6 +2443,7 @@ class HubLifecycleTests final : public QObject {
   }
 
   void hubLifecycleDiagnostics() { testHubLifecycleDiagnostics(); }
+  void retainedAttachDiagnosticMatchesStateSemantics() { testRetainedAttachDiagnosticMatchesStateSemantics(); }
   void coordinatorDiagnostics() { testCoordinatorDiagnostics(); }
   void failureCounterResetsOnlyAfterConfirmation() { testFailureCounterResetsOnlyAfterConfirmation(); }
   void confirmationTimeoutRepairsRefreshablePresentation() { testConfirmationTimeoutRepairsRefreshablePresentation(); }
