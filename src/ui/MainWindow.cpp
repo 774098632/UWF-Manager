@@ -978,6 +978,7 @@ void MainWindow::showPlan() {
   ApplyPlanDialog dlg(m_global, m_diskTabs, m_snapshot, m_session, this);
   connect(&dlg, &ApplyPlanDialog::reconciliationRequired, this, &MainWindow::reconcileAfterApply, Qt::QueuedConnection);
   connect(&dlg, &ApplyPlanDialog::safeRestartRequested, m_power.get(), &PowerController::safeRestart);
+  connect(&dlg, &ApplyPlanDialog::directRestartRequested, m_power.get(), &PowerController::directRestart);
   dlg.exec();
 }
 

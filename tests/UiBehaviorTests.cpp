@@ -103,6 +103,7 @@ class UiBehaviorTests final : public QObject {
   void hoverHintUsesRealWidgetEventsAndRestoresBaseline();
   void powerConfirmationDefaultsToCancel();
   void powerConfirmationEscapeAlwaysCancels();
+  void powerConfirmationCanSkipStagingForDirectRestart();
   void powerConfirmationAcceptsOnlyTheExplicitAction();
   void powerDialogShowsProgressAndFailureInPlace();
   void tableCopyReflectsTheActualSelectionAndMissingCells();
@@ -250,6 +251,51 @@ void UiBehaviorTests::powerConfirmationEscapeAlwaysCancels() {
 
   QVERIFY(uwf::ui::runPowerActionDialog(nullptr, {uwf::ui::PowerAction::Restart, {}}) == uwf::ui::PowerActionDialogOutcome::Canceled);
   QVERIFY(escapeRejectedDialog);
+}
+
+void UiBehaviorTests::powerConfirmationCanSkipStagingForDirectRestart() {
+  int preparationPolls = 0;
+  bool safeRestartBlocked = false;
+  bool directRestartAvailable = false;
+  bool restartLabelsCorrect = false;
+  QTimer::singleShot(0, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* safeRestart = dialog->findChild<QPushButton*>(QStringLiteral("restartBtn"));
+    auto* directRestart = dialog->findChild<QPushButton*>(QStringLiteral("directRestartBtn"));
+    safeRestartBlocked = safeRestart && !safeRestart->isEnabled();
+    directRestartAvailable = directRestart && directRestart->isEnabled();
+    auto* hint = dialog->findChild<QLabel*>(QStringLiteral("directPowerHint"));
+    restartLabelsCorrect = safeRestart && safeRestart->text() == QStringLiteral("Safe restart") && directRestart &&
+                           directRestart->text() == QStringLiteral("Direct restart") && hint && hint->isVisible() &&
+                           hint->text().startsWith(QStringLiteral("Direct restart"));
+    if (directRestart) QTest::mouseClick(directRestart, Qt::LeftButton);
+  });
+
+  uwf::ui::PowerActionDialogRequest request{uwf::ui::PowerAction::Restart, [&]() -> std::optional<uwf::ui::PowerStagingPreparation> {
+                                              ++preparationPolls;
+                                              return uwf::ui::PowerStagingNotRequired{};
+                                            }};
+  QVERIFY(uwf::ui::runPowerActionDialog(nullptr, std::move(request)) == uwf::ui::PowerActionDialogOutcome::DirectConfirmed);
+  QVERIFY(safeRestartBlocked);
+  QVERIFY(directRestartAvailable);
+  QVERIFY(restartLabelsCorrect);
+  QCOMPARE(preparationPolls, 0);
+
+  bool shutdownLabelsCorrect = false;
+  QTimer::singleShot(0, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* safeShutdown = dialog->findChild<QPushButton*>(QStringLiteral("dangerBtn"));
+    auto* directShutdown = dialog->findChild<QPushButton*>(QStringLiteral("directShutdownBtn"));
+    auto* hint = dialog->findChild<QLabel*>(QStringLiteral("directPowerHint"));
+    shutdownLabelsCorrect = safeShutdown && safeShutdown->text() == QStringLiteral("Safe shutdown") && directShutdown &&
+                            directShutdown->text() == QStringLiteral("Direct shutdown") && hint && hint->isVisible() &&
+                            hint->text().startsWith(QStringLiteral("Direct shutdown"));
+    if (directShutdown) QTest::mouseClick(directShutdown, Qt::LeftButton);
+  });
+  QVERIFY(uwf::ui::runPowerActionDialog(nullptr, {uwf::ui::PowerAction::Shutdown, {}}) == uwf::ui::PowerActionDialogOutcome::DirectConfirmed);
+  QVERIFY(shutdownLabelsCorrect);
 }
 
 void UiBehaviorTests::powerConfirmationAcceptsOnlyTheExplicitAction() {

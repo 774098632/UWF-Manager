@@ -49,6 +49,27 @@ void PowerController::safeShutdown() { execute(PowerAction::Shutdown); }
 
 void PowerController::safeRestart() { execute(PowerAction::Restart); }
 
+void PowerController::directRestart() { executeDirectRestart(); }
+
+void PowerController::executeDirectRestart() {
+  if (m_actionActive) return;
+  m_actionActive = true;
+  const auto releaseAction = qScopeGuard([this] { m_actionActive = false; });
+  try {
+    PowerActionDialogRequest request{PowerAction::Restart, {}, std::nullopt, PowerActionDialogMode::Direct};
+    const auto outcome = runPowerActionDialog(m_dialogParent, std::move(request));
+    if (outcome == PowerActionDialogOutcome::Canceled) return;
+    if (outcome != PowerActionDialogOutcome::DirectConfirmed) {
+      throw std::logic_error("direct restart dialog returned an invalid outcome");
+    }
+    invokePowerAction(PowerAction::Restart);
+  } catch (const std::exception& error) {
+    reportPowerFailure(PowerAction::Restart, error, PowerActionDialogMode::Direct);
+  } catch (...) {
+    reportUnknownPowerFailure(PowerAction::Restart, PowerActionDialogMode::Direct);
+  }
+}
+
 void PowerController::execute(const PowerAction action) {
   if (m_actionActive) return;
   m_actionActive = true;
@@ -79,13 +100,14 @@ void PowerController::execute(const PowerAction action) {
     }
     executeReserved(action, std::move(*batch));
   } catch (const std::exception& error) {
-    reportPowerFailure(action, error);
+    reportPowerFailure(action, error, PowerActionDialogMode::Safe);
   } catch (...) {
-    reportUnknownPowerFailure(action);
+    reportUnknownPowerFailure(action, PowerActionDialogMode::Safe);
   }
 }
 
 void PowerController::executeReserved(const PowerAction action, FileStagingCoordinator::ExternalBatch batch) {
+  PowerActionDialogMode failureMode = PowerActionDialogMode::Safe;
   std::optional<QList<app::FileStagingEntry>> stagedEntries;
   std::optional<app::ApplicationCommandResult> stagingResult;
   // 只有形成最终批次结果后才完成租约。用户在提交前取消时，租约析构会把
@@ -182,6 +204,16 @@ void PowerController::executeReserved(const PowerAction action, FileStagingCoord
       case PowerActionDialogOutcome::CanceledAfterStagingFailure:
         UWF_LOG_I("power") << "safe power action canceled after file staging failure";
         return;
+      case PowerActionDialogOutcome::DirectConfirmed:
+        failureMode = PowerActionDialogMode::Direct;
+        invokePowerAction(action);
+        if (!stagingResult) {
+          app::ApplicationCommandResult skipped;
+          skipped.outcome = app::ApplicationCommandOutcome::Rejected;
+          skipped.detail = I18n::tr("File staging was skipped because a direct power action was selected.");
+          batch.complete({skipped, stagedEntries});
+        }
+        return;
       case PowerActionDialogOutcome::ContinuedAfterStagingFailure:
         UWF_LOG_W("power") << "safe power action continuing after user accepted file staging failures";
         if (!stagingResult) throw std::logic_error("safe power action has no file staging failure to approve");
@@ -198,13 +230,14 @@ void PowerController::executeReserved(const PowerAction action, FileStagingCoord
     }
     invokePowerAction(action);
   } catch (const std::exception& error) {
-    reportPowerFailure(action, error);
+    reportPowerFailure(action, error, failureMode);
   } catch (...) {
-    reportUnknownPowerFailure(action);
+    reportUnknownPowerFailure(action, failureMode);
   }
 }
 
 void PowerController::executeWithCompletedStaging(const PowerAction action, FileStagingBatchResult stagingResult, FileStagingCoordinator::ExternalBatch batch) {
+  PowerActionDialogMode failureMode = PowerActionDialogMode::Safe;
   bool completeBatch = false;
   const auto releaseBatch = qScopeGuard([&] {
     if (completeBatch) batch.complete(stagingResult);
@@ -227,6 +260,12 @@ void PowerController::executeWithCompletedStaging(const PowerAction action, File
       completeBatch = stagingResult.command.completed();
       return;
     }
+    if (outcome == PowerActionDialogOutcome::DirectConfirmed) {
+      failureMode = PowerActionDialogMode::Direct;
+      completeBatch = true;
+      invokePowerAction(action);
+      return;
+    }
     if (outcome == PowerActionDialogOutcome::ContinuedAfterStagingFailure) {
       UWF_LOG_W("power") << "safe power action continuing after user accepted file staging failures";
       if (stagingResult.command.failedFiles == 0) throw std::logic_error("cannot approve a file staging failure without a recorded failed target");
@@ -238,9 +277,9 @@ void PowerController::executeWithCompletedStaging(const PowerAction action, File
     completeBatch = true;
     invokePowerAction(action);
   } catch (const std::exception& error) {
-    reportPowerFailure(action, error);
+    reportPowerFailure(action, error, failureMode);
   } catch (...) {
-    reportUnknownPowerFailure(action);
+    reportUnknownPowerFailure(action, failureMode);
   }
 }
 
@@ -268,19 +307,29 @@ void PowerController::invokePowerAction(const PowerAction action) {
   revokeSkipOnFailure.dismiss();
 }
 
-void PowerController::reportPowerFailure(const PowerAction action, const std::exception& error) {
+void PowerController::reportPowerFailure(const PowerAction action, const std::exception& error, const PowerActionDialogMode mode) {
   const bool shutdown = action == PowerAction::Shutdown;
-  UWF_LOG_E("power") << (shutdown ? "safe shutdown failed: error=" : "safe restart failed: error=") << error.what();
-  const QString title = shutdown ? I18n::tr("Safe shutdown failed") : I18n::tr("Safe restart failed");
+  const bool direct = mode == PowerActionDialogMode::Direct;
+  UWF_LOG_E("power") << (direct ? (shutdown ? "direct shutdown failed: error=" : "direct restart failed: error=")
+                                 : (shutdown ? "safe shutdown failed: error=" : "safe restart failed: error="))
+                     << error.what();
+  const QString title = direct ? (shutdown ? I18n::tr("Direct shutdown failed") : I18n::tr("Direct restart failed"))
+                               : (shutdown ? I18n::tr("Safe shutdown failed") : I18n::tr("Safe restart failed"));
   const QString message =
       shutdown ? I18n::tr("Shutdown failed: %1").arg(QString::fromUtf8(error.what())) : I18n::tr("Restart failed: %1").arg(QString::fromUtf8(error.what()));
   warning(m_dialogParent, title, message);
 }
 
-void PowerController::reportUnknownPowerFailure(const PowerAction action) {
+void PowerController::reportUnknownPowerFailure(const PowerAction action, const PowerActionDialogMode mode) {
   const bool shutdown = action == PowerAction::Shutdown;
-  UWF_LOG_E("power") << (shutdown ? "safe shutdown failed: error=non-standard-exception" : "safe restart failed: error=non-standard-exception");
-  warning(m_dialogParent, shutdown ? I18n::tr("Safe shutdown failed") : I18n::tr("Safe restart failed"),
+  const bool direct = mode == PowerActionDialogMode::Direct;
+  UWF_LOG_E("power") << (direct ? (shutdown ? "direct shutdown failed: error=non-standard-exception"
+                                           : "direct restart failed: error=non-standard-exception")
+                              : (shutdown ? "safe shutdown failed: error=non-standard-exception"
+                                          : "safe restart failed: error=non-standard-exception"));
+  warning(m_dialogParent,
+          direct ? (shutdown ? I18n::tr("Direct shutdown failed") : I18n::tr("Direct restart failed"))
+                 : (shutdown ? I18n::tr("Safe shutdown failed") : I18n::tr("Safe restart failed")),
           I18n::tr("The operation failed with an unknown error."));
 }
 

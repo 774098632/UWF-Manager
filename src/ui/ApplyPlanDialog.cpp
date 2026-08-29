@@ -428,10 +428,19 @@ ApplyPlanDialog::ApplyPlanDialog(GlobalStatusPanel* global, const QVector<QPoint
   auto* restartBtn = new QPushButton(I18n::tr("Safe restart"), this);
   restartBtn->setObjectName("restartBtn");
   restartBtn->setVisible(false);
+  auto* directRestartBtn = new QPushButton(I18n::tr("Direct restart"), this);
+  directRestartBtn->setObjectName("directRestartBtn");
+  directRestartBtn->setVisible(false);
+  auto* directRestartHint = new QLabel(I18n::tr("Direct restart skips File staging commits."), this);
+  directRestartHint->setObjectName("directRestartHint");
+  directRestartHint->setStyleSheet(QStringLiteral("color: %1;").arg(ThemeManager::instance().color(Sem::FgMuted).name()));
+  directRestartHint->setVisible(false);
   auto* exportBtn = new QPushButton(I18n::tr("Export commands…"), this);
   auto* closeBtn = new QPushButton(I18n::tr("Close"), this);
   buttonRow->addWidget(commitBtn);
   buttonRow->addWidget(restartBtn);
+  buttonRow->addWidget(directRestartBtn);
+  buttonRow->addWidget(directRestartHint);
   buttonRow->addStretch(1);
   buttonRow->addWidget(exportBtn);
   buttonRow->addWidget(closeBtn);
@@ -494,7 +503,9 @@ ApplyPlanDialog::ApplyPlanDialog(GlobalStatusPanel* global, const QVector<QPoint
 
   connect(closeBtn, &QPushButton::clicked, this, &QDialog::reject);
   connect(restartBtn, &QPushButton::clicked, this, &ApplyPlanDialog::safeRestartRequested);
-  connect(commitBtn, &QPushButton::clicked, this, [this, pendingText, commitBtn, restartBtn, formatBlockPlain, joinLines]() {
+  connect(directRestartBtn, &QPushButton::clicked, this, &ApplyPlanDialog::directRestartRequested);
+  connect(commitBtn, &QPushButton::clicked, this,
+          [this, pendingText, commitBtn, restartBtn, directRestartBtn, directRestartHint, formatBlockPlain, joinLines]() {
     // 真实写入前再弹一次二次确认，避免误点。
     const QString warn2 = ThemeManager::instance().color(Sem::Warn).name();
     if (!confirm(this, I18n::tr("Confirm apply"),
@@ -723,7 +734,10 @@ ApplyPlanDialog::ApplyPlanDialog(GlobalStatusPanel* global, const QVector<QPoint
     const std::string body = formatBlockPlain(I18n::tr("Applied changes").toStdString(), m_changeCmds) + "\n:: ==== " + I18n::tr("Result").toStdString() +
                              " ====\n" + joinLines(journal.lines());
     pendingText->setPlainText(QString::fromStdString(body));
-    restartBtn->setVisible(journal.anyWriteConfirmed());
+    const bool restartAvailable = journal.anyWriteConfirmed();
+    restartBtn->setVisible(restartAvailable);
+    directRestartBtn->setVisible(restartAvailable);
+    directRestartHint->setVisible(restartAvailable);
     // 所有前置读取都失败或前置条件不满足时，系统没有收到任何写请求，可以
     // 安全重试；只要写请求实际提交给 provider，或重新读取已确认目标状态本就
     // 收敛，就交回宿主刷新并保持禁用，避免重放部分成功或已经过期的批次。

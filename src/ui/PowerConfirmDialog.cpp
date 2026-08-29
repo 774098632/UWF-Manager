@@ -153,21 +153,30 @@ PowerActionDialogOutcome runPowerActionDialog(QWidget* parent, PowerActionDialog
   if (request.pollStagingPreparation && request.completedStagingFailure) {
     throw std::invalid_argument("power dialog cannot prepare and reuse a completed staging result simultaneously");
   }
+  if (request.mode == PowerActionDialogMode::Direct && (request.pollStagingPreparation || request.completedStagingFailure)) {
+    throw std::invalid_argument("direct power dialog cannot prepare or reuse file staging");
+  }
   const PowerAction action = request.action;
   const bool preparationRequired = static_cast<bool>(request.pollStagingPreparation);
   const bool shutdown = action == PowerAction::Shutdown;
-  const QString title = shutdown ? I18n::tr("Safe shutdown") : I18n::tr("Safe restart");
-  const QString heading = shutdown ? I18n::tr("Confirm safe shutdown?") : I18n::tr("Confirm safe restart?");
-  const QString actionText = shutdown ? I18n::tr("Shut down") : I18n::tr("Restart");
+  const bool direct = request.mode == PowerActionDialogMode::Direct;
+  const QString directText = shutdown ? I18n::tr("Direct shutdown") : I18n::tr("Direct restart");
+  const QString title = direct ? directText : (shutdown ? I18n::tr("Safe shutdown") : I18n::tr("Safe restart"));
+  const QString heading = direct ? (shutdown ? I18n::tr("Confirm direct shutdown?") : I18n::tr("Confirm direct restart?"))
+                                 : (shutdown ? I18n::tr("Confirm safe shutdown?") : I18n::tr("Confirm safe restart?"));
+  const QString actionText = direct ? directText : (shutdown ? I18n::tr("Safe shutdown") : I18n::tr("Safe restart"));
   const QString continueText = shutdown ? I18n::tr("Continue shutdown") : I18n::tr("Continue restart");
-  const QString summaryText = shutdown ? I18n::tr("The system will shut down safely through UWF.") : I18n::tr("The system will restart safely through UWF.");
+  const QString summaryText = direct ? (shutdown ? I18n::tr("The system will shut down without committing files in File staging.")
+                                                 : I18n::tr("The system will restart without committing files in File staging."))
+                                     : (shutdown ? I18n::tr("The system will shut down safely through UWF.")
+                                                 : I18n::tr("The system will restart safely through UWF."));
   const QString iconPath = shutdown ? QStringLiteral(":/icons/shutdown.svg") : QStringLiteral(":/icons/restart.svg");
 
   PowerDialog dialog(parent);
   dialog.setObjectName(QStringLiteral("powerConfirmDialog"));
   dialog.setWindowTitle(title);
   dialog.setWindowIcon(ThemeManager::instance().icon(iconPath));
-  dialog.setMinimumWidth(500);
+  dialog.setMinimumWidth(direct ? 500 : 650);
 
   auto* layout = new QVBoxLayout(&dialog);
   layout->setContentsMargins(24, 22, 24, 16);
@@ -213,12 +222,16 @@ PowerActionDialogOutcome runPowerActionDialog(QWidget* parent, PowerActionDialog
   auto* safetyLayout = new QVBoxLayout(safetyCard);
   safetyLayout->setContentsMargins(14, 12, 14, 12);
   safetyLayout->setSpacing(4);
-  auto* safetyHeading = new QLabel(I18n::tr("UWF protection"), safetyCard);
+  auto* safetyHeading = new QLabel(direct ? I18n::tr("File staging will be skipped") : I18n::tr("UWF protection"), safetyCard);
   QFont safetyFont = safetyHeading->font();
   safetyFont.setBold(true);
   safetyHeading->setFont(safetyFont);
   safetyLayout->addWidget(safetyHeading);
-  auto* safetyDetail = new QLabel(I18n::tr("This operation remains available even if the UWF overlay is full."), safetyCard);
+  auto* safetyDetail =
+      new QLabel(direct ? (shutdown ? I18n::tr("Files in File staging will not be committed before shutdown.")
+                                    : I18n::tr("Files in File staging will not be committed before restart."))
+                        : I18n::tr("This operation remains available even if the UWF overlay is full."),
+                 safetyCard);
   safetyDetail->setWordWrap(true);
   safetyDetail->setStyleSheet(QStringLiteral("color: %1;").arg(theme.color(Sem::FgMuted).name()));
   safetyLayout->addWidget(safetyDetail);
@@ -281,10 +294,26 @@ PowerActionDialogOutcome runPowerActionDialog(QWidget* parent, PowerActionDialog
 
   auto* buttons = new QDialogButtonBox(&dialog);
   auto* actionButton = buttons->addButton(actionText, QDialogButtonBox::AcceptRole);
-  actionButton->setObjectName(shutdown ? QStringLiteral("dangerBtn") : QStringLiteral("restartBtn"));
+  actionButton->setObjectName(direct ? (shutdown ? QStringLiteral("directShutdownBtn") : QStringLiteral("directRestartBtn"))
+                                     : (shutdown ? QStringLiteral("dangerBtn") : QStringLiteral("restartBtn")));
+  QPushButton* directActionButton = nullptr;
+  if (!direct) {
+    directActionButton = buttons->addButton(directText, QDialogButtonBox::DestructiveRole);
+    directActionButton->setObjectName(shutdown ? QStringLiteral("directShutdownBtn") : QStringLiteral("directRestartBtn"));
+    directActionButton->setAutoDefault(false);
+  }
   auto* cancelButton = buttons->addButton(I18n::tr("Cancel"), QDialogButtonBox::RejectRole);
   QObject::connect(cancelButton, &QPushButton::clicked, &dialog, &QDialog::reject);
-  layout->addWidget(buttons);
+  auto* buttonRow = new QHBoxLayout();
+  auto* directHint = new QLabel(shutdown ? I18n::tr("Direct shutdown skips File staging commits.")
+                                        : I18n::tr("Direct restart skips File staging commits."),
+                                &dialog);
+  directHint->setObjectName(QStringLiteral("directPowerHint"));
+  directHint->setStyleSheet(QStringLiteral("color: %1;").arg(theme.color(Sem::FgMuted).name()));
+  directHint->setVisible(!direct);
+  buttonRow->addWidget(directHint, 1);
+  buttonRow->addWidget(buttons);
+  layout->addLayout(buttonRow);
   actionButton->setAutoDefault(false);
   actionButton->setEnabled(!preparationRequired);
   cancelButton->setAutoDefault(true);
@@ -301,6 +330,8 @@ PowerActionDialogOutcome runPowerActionDialog(QWidget* parent, PowerActionDialog
   std::optional<PowerStagingPreparation> completedPreparation;
   QTimer stepTimer(&dialog);
   stepTimer.setSingleShot(true);
+  bool directSelected = false;
+  bool stagingStarted = false;
 
   const auto showFailure = [&](const PowerStagingProgress& status) {
     preparationTimer.stop();
@@ -323,6 +354,11 @@ PowerActionDialogOutcome runPowerActionDialog(QWidget* parent, PowerActionDialog
     warningCard->show();
     actionButton->setText(continueText);
     actionButton->setEnabled(true);
+    if (directActionButton) {
+      directActionButton->setVisible(!stagingStarted);
+      directActionButton->setEnabled(!stagingStarted);
+      directHint->setVisible(!stagingStarted);
+    }
     cancelButton->setEnabled(true);
     dialog.setRejectionEnabled(true);
     cancelButton->setDefault(true);
@@ -450,6 +486,8 @@ PowerActionDialogOutcome runPowerActionDialog(QWidget* parent, PowerActionDialog
     }
 
     lifecycle.post(PowerDialogLifecycle::Event::BeginStaging);
+    stagingStarted = true;
+    directHint->hide();
     headingLabel->setText(I18n::tr("Committing staged files"));
     summary->setText(I18n::tr("The power action will continue after file staging completes."));
     stagingDetail->setText(I18n::tr("Processed %1 of %2 file(s).").arg(0).arg(static_cast<qulonglong>(filesToCommit)));
@@ -459,10 +497,20 @@ PowerActionDialogOutcome runPowerActionDialog(QWidget* parent, PowerActionDialog
     progress->show();
     warningCard->hide();
     actionButton->setEnabled(false);
+    if (directActionButton) directActionButton->setEnabled(false);
     cancelButton->setEnabled(false);
     dialog.setRejectionEnabled(false);
     stepTimer.start(0);
   });
+
+  if (directActionButton) {
+    QObject::connect(directActionButton, &QPushButton::clicked, &dialog, [&] {
+      preparationTimer.stop();
+      stepTimer.stop();
+      directSelected = true;
+      dialog.accept();
+    });
+  }
 
   if (request.completedStagingFailure) {
     showFailure({PowerStagingState::Failed, 0, 0, {}, std::move(request.completedStagingFailure->details)});
@@ -470,13 +518,16 @@ PowerActionDialogOutcome runPowerActionDialog(QWidget* parent, PowerActionDialog
     preparationTimer.start(kPreparationPollIntervalMs);
   }
   const bool accepted = dialog.exec() == QDialog::Accepted;
+  if (directSelected) return PowerActionDialogOutcome::DirectConfirmed;
   if (!lifecycle.terminal()) {
     if (accepted)
       lifecycle.post(PowerDialogLifecycle::Event::Confirm);
     else
       lifecycle.post(PowerDialogLifecycle::Event::Cancel);
   }
-  return lifecycle.outcome();
+  const auto outcome = lifecycle.outcome();
+  if (direct && outcome == PowerActionDialogOutcome::Confirmed) return PowerActionDialogOutcome::DirectConfirmed;
+  return outcome;
 }
 
 }  // namespace uwf::ui

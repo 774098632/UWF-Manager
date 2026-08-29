@@ -1595,10 +1595,16 @@ void ApplicationUiBehaviorTests::applyPlanConfirmedWritePublishesReconciliationA
   dialog.show();
   QVERIFY(QTest::qWaitForWindowExposed(&dialog));
   QSignalSpy reconciliation(&dialog, &ui::ApplyPlanDialog::reconciliationRequired);
+  QSignalSpy safeRestartRequested(&dialog, &ui::ApplyPlanDialog::safeRestartRequested);
+  QSignalSpy directRestartRequested(&dialog, &ui::ApplyPlanDialog::directRestartRequested);
   auto* apply = buttonWithText(&dialog, QStringLiteral("Apply"));
   auto* restart = dialog.findChild<QPushButton*>(QStringLiteral("restartBtn"));
+  auto* directRestart = dialog.findChild<QPushButton*>(QStringLiteral("directRestartBtn"));
+  auto* directRestartHint = dialog.findChild<QLabel*>(QStringLiteral("directRestartHint"));
   QVERIFY(apply && apply->isEnabled());
   QVERIFY(restart && restart->isHidden());
+  QVERIFY(directRestart && directRestart->isHidden());
+  QVERIFY(directRestartHint && directRestartHint->isHidden());
 
   QTimer::singleShot(0, this, [] {
     if (auto* confirmation = qobject_cast<QDialog*>(QApplication::activeModalWidget())) confirmation->accept();
@@ -1609,6 +1615,13 @@ void ApplicationUiBehaviorTests::applyPlanConfirmedWritePublishesReconciliationA
   QCOMPARE(reconciliation.count(), 1);
   QVERIFY(!apply->isEnabled());
   QVERIFY(!restart->isHidden());
+  QVERIFY(!directRestart->isHidden());
+  QVERIFY(!directRestartHint->isHidden());
+  QVERIFY(directRestartHint->text().contains(QStringLiteral("skips File staging commits")));
+  QTest::mouseClick(restart, Qt::LeftButton);
+  QTest::mouseClick(directRestart, Qt::LeftButton);
+  QCOMPARE(safeRestartRequested.count(), 1);
+  QCOMPARE(directRestartRequested.count(), 1);
   bool successReported = false;
   for (auto* edit : dialog.findChildren<QTextEdit*>()) {
     successReported = successReported || edit->toPlainText().contains(QStringLiteral("Filter: Disabled"));
@@ -1925,6 +1938,99 @@ void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInj
   controller.safeRestart();
   QVERIFY(emptyPreparationBlockedAction);
   QCOMPARE(wmi.invocations, std::vector<QString>{QStringLiteral("RestartSystem")});
+
+  RecordingWmiOperations directFromSafeWmi;
+  directFromSafeWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  MemoryFileStagingStore directFromSafeStore;
+  directFromSafeStore.entries = {{app::FileStagingKind::File, QStringLiteral("C:\\never-commit.bin")}};
+  ui::FileStagingCoordinator directFromSafeCoordinator(directFromSafeWmi, directFromSafeStore, UwfCapability::Available, nullptr);
+  int directFromSafePreshutdownMarks = 0;
+  ui::PowerController directFromSafeController(
+      {directFromSafeWmi,
+       directFromSafeStore,
+       UwfCapability::Available,
+       directFromSafeCoordinator,
+       {[&] {
+          ++directFromSafePreshutdownMarks;
+          return PreshutdownControlResult::Acknowledged;
+        },
+        {}}},
+      nullptr);
+  bool directOptionAvailableDuringPreparation = false;
+  std::optional<app::ApplicationCommandResult> skippedConcurrentCommit;
+  QTimer directFromSafeDriver;
+  directFromSafeDriver.setInterval(1);
+  connect(&directFromSafeDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* safeRestart = dialog->findChild<QPushButton*>(QStringLiteral("restartBtn"));
+    auto* directRestart = dialog->findChild<QPushButton*>(QStringLiteral("directRestartBtn"));
+    if (!safeRestart || !directRestart) return;
+    directOptionAvailableDuringPreparation = !safeRestart->isEnabled() && directRestart->isEnabled();
+    directFromSafeCoordinator.requestCommit([&](const ui::FileStagingBatchResult& result) { skippedConcurrentCommit = result.command; });
+    QTest::mouseClick(directRestart, Qt::LeftButton);
+    directFromSafeDriver.stop();
+  });
+  directFromSafeDriver.start();
+  directFromSafeController.safeRestart();
+  QVERIFY(directOptionAvailableDuringPreparation);
+  QVERIFY(skippedConcurrentCommit.has_value());
+  QCOMPARE(skippedConcurrentCommit->outcome, app::ApplicationCommandOutcome::Rejected);
+  QCOMPARE(directFromSafeStore.loads, 0);
+  QCOMPARE(directFromSafeWmi.invocations, std::vector<QString>{QStringLiteral("RestartSystem")});
+  QCOMPARE(directFromSafePreshutdownMarks, 1);
+
+  RecordingWmiOperations directShutdownWmi;
+  directShutdownWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  MemoryFileStagingStore directShutdownStore;
+  directShutdownStore.entries = directFromSafeStore.entries;
+  ui::FileStagingCoordinator directShutdownCoordinator(directShutdownWmi, directShutdownStore, UwfCapability::Available, nullptr);
+  ui::PowerController directShutdownController({directShutdownWmi, directShutdownStore, UwfCapability::Available, directShutdownCoordinator}, nullptr);
+  bool directShutdownConfirmed = false;
+  QTimer directShutdownDriver;
+  directShutdownDriver.setInterval(1);
+  connect(&directShutdownDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* directShutdown = dialog->findChild<QPushButton*>(QStringLiteral("directShutdownBtn"));
+    if (!directShutdown || !directShutdown->isEnabled()) return;
+    directShutdownConfirmed = directShutdown->text() == QStringLiteral("Direct shutdown");
+    QTest::mouseClick(directShutdown, Qt::LeftButton);
+    directShutdownDriver.stop();
+  });
+  directShutdownDriver.start();
+  directShutdownController.safeShutdown();
+  QVERIFY(directShutdownConfirmed);
+  QCOMPARE(directShutdownStore.loads, 0);
+  QCOMPARE(directShutdownWmi.invocations, std::vector<QString>{QStringLiteral("ShutdownSystem")});
+
+  RecordingWmiOperations directWmi;
+  directWmi.queryResults.push_back(
+      {{{"__PATH", WmiValue::fromString("filter-path")}, {"CurrentEnabled", WmiValue::fromBool(true)}, {"NextEnabled", WmiValue::fromBool(true)}}});
+  MemoryFileStagingStore directStore;
+  directStore.entries = directFromSafeStore.entries;
+  ui::FileStagingCoordinator directCoordinator(directWmi, directStore, UwfCapability::Available, nullptr);
+  ui::PowerController directController({directWmi, directStore, UwfCapability::Available, directCoordinator}, nullptr);
+  bool directDialogConfirmed = false;
+  QTimer directDriver;
+  directDriver.setInterval(1);
+  connect(&directDriver, &QTimer::timeout, this, [&] {
+    auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    if (!dialog) return;
+    auto* directRestart = dialog->findChild<QPushButton*>(QStringLiteral("directRestartBtn"));
+    if (!directRestart || !directRestart->isEnabled()) return;
+    directDialogConfirmed = dialog->windowTitle() == QStringLiteral("Direct restart") &&
+                            dialog->findChild<QPushButton*>(QStringLiteral("restartBtn")) == nullptr;
+    QTest::mouseClick(directRestart, Qt::LeftButton);
+    directDriver.stop();
+  });
+  directDriver.start();
+  directController.directRestart();
+  QVERIFY(directDialogConfirmed);
+  QCOMPARE(directStore.loads, 0);
+  QCOMPARE(directWmi.invocations, std::vector<QString>{QStringLiteral("RestartSystem")});
 
   QTemporaryDir directory;
   QVERIFY(directory.isValid());

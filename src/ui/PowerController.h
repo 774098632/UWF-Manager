@@ -30,6 +30,7 @@ class QWidget;
 namespace uwf::ui {
 
 enum class PowerAction;
+enum class PowerActionDialogMode;
 
 // UWF 安全关机 / 重启用例：先显示单一对话框，再异步展开文件暂存目录；统一
 // 提交计划、确认与进度、Filter 复核、WMI 电源调用和失败决策。工具栏与应用
@@ -64,14 +65,16 @@ class PowerController : public QObject {
  public slots:
   void safeShutdown();
   void safeRestart();
+  void directRestart();
 
  private:
   void execute(PowerAction action);
+  void executeDirectRestart();
   void executeReserved(PowerAction action, FileStagingCoordinator::ExternalBatch batch);
   void executeWithCompletedStaging(PowerAction action, FileStagingBatchResult stagingResult, FileStagingCoordinator::ExternalBatch batch);
   void invokePowerAction(PowerAction action);
-  void reportPowerFailure(PowerAction action, const std::exception& error);
-  void reportUnknownPowerFailure(PowerAction action);
+  void reportPowerFailure(PowerAction action, const std::exception& error, PowerActionDialogMode mode);
+  void reportUnknownPowerFailure(PowerAction action, PowerActionDialogMode mode);
 
   QWidget* m_dialogParent;
   WmiOperations& m_session;

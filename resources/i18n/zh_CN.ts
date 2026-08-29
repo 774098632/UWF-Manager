@@ -520,6 +520,8 @@ Next session: %2</source>
         <translation>安全关机：即使 UWF 覆盖层已满也能正常关机。</translation>
     </message>
     <message><source>Safe restart</source><translation>安全重启</translation></message>
+    <message><source>Direct restart</source><translation>直接重启</translation></message>
+    <message><source>Direct shutdown</source><translation>直接关机</translation></message>
     <message>
         <source>Restart safely, even when the UWF overlay is full.</source>
         <translation>安全重启：即使 UWF 覆盖层已满也能正常重启。</translation>
@@ -741,9 +743,21 @@ Canceled by user; %1 entries not processed.</source>
     <message><source>Automatic file staging stopped because of an unknown error.</source><translation>文件暂存因未知错误中止。</translation></message>
     <message><source>Uncommitted changes will be lost</source><translation>尚未提交的更改将会丢失</translation></message>
     <message><source>Before continuing, save your work and commit any changes that you want to keep permanently.</source><translation>继续前，请保存当前工作，并通过 UWF 提交需要永久保留的更改。</translation></message>
+    <message><source>Confirm direct restart?</source><translation>确认直接重启？</translation></message>
+    <message><source>Confirm direct shutdown?</source><translation>确认直接关机？</translation></message>
+    <message><source>The system will restart without committing files in File staging.</source><translation>系统将跳过文件暂存区的提交并直接重启。</translation></message>
+    <message><source>The system will shut down without committing files in File staging.</source><translation>系统将跳过文件暂存区的提交并直接关机。</translation></message>
+    <message><source>File staging will be skipped</source><translation>将跳过文件暂存区</translation></message>
+    <message><source>Files in File staging will not be committed before restart.</source><translation>重启前不会提交文件暂存区中的文件。</translation></message>
+    <message><source>Files in File staging will not be committed before shutdown.</source><translation>关机前不会提交文件暂存区中的文件。</translation></message>
+    <message><source>Direct restart skips File staging commits.</source><translation>直接重启会跳过文件暂存区提交。</translation></message>
+    <message><source>Direct shutdown skips File staging commits.</source><translation>直接关机会跳过文件暂存区提交。</translation></message>
+    <message><source>File staging was skipped because a direct power action was selected.</source><translation>已选择直接操作，因此跳过文件暂存区提交。</translation></message>
     <message><source>Safe shutdown failed</source><translation>安全关机失败</translation></message>
     <message><source>Shutdown failed: %1</source><translation>关机失败：%1</translation></message>
     <message><source>Safe restart failed</source><translation>安全重启失败</translation></message>
+    <message><source>Direct restart failed</source><translation>直接重启失败</translation></message>
+    <message><source>Direct shutdown failed</source><translation>直接关机失败</translation></message>
     <message><source>Restart failed: %1</source><translation>重启失败：%1</translation></message>
     <message>
         <source>The file staging list could not be read:

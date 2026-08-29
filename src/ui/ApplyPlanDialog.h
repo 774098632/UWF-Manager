@@ -67,9 +67,9 @@ class ApplyPlanDialog : public QDialog {
   // 当对话框内的基线可能已过期时发出。宿主必须在新快照完整读取
   // 成功前阻止继续编辑或重放这批变更。
   void reconciliationRequired();
-  // 应用开始后出现的"安全重启"按钮只负责发出请求；宿主连接到与工具栏
-  // 相同的重启入口，确保复用同一份确认与错误处理逻辑。
+  // 应用开始后出现的重启按钮只负责发出请求，确认与执行统一交给宿主。
   void safeRestartRequested();
+  void directRestartRequested();
 
  private:
   // 一条变更或快照配置：comment 是中文说明（渲染成 ":: 注释"行），cmd 是

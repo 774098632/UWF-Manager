@@ -29,8 +29,10 @@ namespace uwf::ui {
 
 enum class PowerAction { Shutdown, Restart };
 
+enum class PowerActionDialogMode { Safe, Direct };
+
 enum class PowerStagingState { InProgress, Completed, Failed };
-enum class PowerActionDialogOutcome { Canceled, Confirmed, CanceledAfterStagingFailure, ContinuedAfterStagingFailure };
+enum class PowerActionDialogOutcome { Canceled, Confirmed, DirectConfirmed, CanceledAfterStagingFailure, ContinuedAfterStagingFailure };
 
 struct PowerStagingProgress {
   PowerStagingState state = PowerStagingState::Completed;
@@ -55,10 +57,15 @@ using PowerStagingPreparation = std::variant<PowerStagingNotRequired, PowerStagi
 
 struct PowerActionDialogRequest {
   PowerActionDialogRequest(PowerAction requestedAction, std::function<std::optional<PowerStagingPreparation>()> preparation = {},
-                           std::optional<PowerStagingFailure> completedFailure = std::nullopt)
-      : action(requestedAction), pollStagingPreparation(std::move(preparation)), completedStagingFailure(std::move(completedFailure)) {}
+                           std::optional<PowerStagingFailure> completedFailure = std::nullopt,
+                           PowerActionDialogMode requestedMode = PowerActionDialogMode::Safe)
+      : action(requestedAction),
+        mode(requestedMode),
+        pollStagingPreparation(std::move(preparation)),
+        completedStagingFailure(std::move(completedFailure)) {}
 
   PowerAction action;
+  PowerActionDialogMode mode;
   // 返回 nullopt 表示仍在计算。回调首次在对话框进入事件循环后执行，确保
   // 文件系统扫描不会阻塞对话框的首次显示；返回结果后不再调用。
   std::function<std::optional<PowerStagingPreparation>()> pollStagingPreparation;
