@@ -247,11 +247,15 @@ void WmiApiBehaviorTests::rowDecodingDistinguishesMissingNullWrongTypeAndEmpty()
              {"Text", WmiValue::fromString("")},
              {"Null", WmiValue{}}};
   QCOMPARE(rowutil::requireBool(row, "Bool"), true);
+  QCOMPARE(rowutil::requireBoolOrFalseIfNull(row, "Bool"), true);
+  QCOMPARE(rowutil::requireBoolOrFalseIfNull(row, "Null"), false);
   QCOMPARE(rowutil::requireInt(row, "Int"), -42);
   QCOMPARE(rowutil::requireUInt(row, "UInt"), 42u);
   QVERIFY(rowutil::requireString(row, "Text").empty());
   QVERIFY_THROWS_EXCEPTION(WmiDecodeError, (void)rowutil::requireString(row, "Text", rowutil::EmptyString::Reject));
   QVERIFY_THROWS_EXCEPTION(WmiDecodeError, (void)rowutil::requireBool(row, "Missing"));
+  QVERIFY_THROWS_EXCEPTION(WmiDecodeError, (void)rowutil::requireBoolOrFalseIfNull(row, "Missing"));
+  QVERIFY_THROWS_EXCEPTION(WmiDecodeError, (void)rowutil::requireBoolOrFalseIfNull(row, "UInt"));
   QVERIFY_THROWS_EXCEPTION(WmiDecodeError, (void)rowutil::requireString(row, "Null"));
   QVERIFY_THROWS_EXCEPTION(WmiDecodeError, (void)rowutil::requireUInt(row, "Bool"));
 }
@@ -306,6 +310,14 @@ void WmiApiBehaviorTests::filterRequiresExactlyOneRowAndConfirmsWrites() {
   QVERIFY(!row.nextEnabled);
   QCOMPARE(wmi.instanceQueries, std::vector<std::string>{"SELECT * FROM UWF_Filter"});
   QVERIFY(wmi.projectionQueries.empty());
+
+  WmiRow unconfigured = filterRow(true, true);
+  unconfigured["CurrentEnabled"] = WmiValue{};
+  unconfigured["NextEnabled"] = WmiValue{};
+  wmi.queryResults.push_back({unconfigured});
+  const auto unconfiguredRow = filter.read();
+  QVERIFY(!unconfiguredRow.currentEnabled);
+  QVERIFY(!unconfiguredRow.nextEnabled);
 
   wmi.objectResults.push_back(filterRow(true, true));
   filter.enable(row);
@@ -523,6 +535,13 @@ void WmiApiBehaviorTests::volumeDecodingSkipsUnmanagedRowsAndRejectsDuplicates()
   QCOMPARE(rows.front().driveLetter, std::string("C:"));
   QCOMPARE(wmi.instanceQueries, std::vector<std::string>{"SELECT * FROM UWF_Volume"});
   QVERIFY(wmi.projectionQueries.empty());
+
+  WmiRow unconfigured = volumeRow(true, "E:", "Volume{e}", true, false, true, "current-e");
+  unconfigured["Protected"] = WmiValue{};
+  wmi.queryResults.push_back({unconfigured});
+  const auto unconfiguredRows = volume.readAll();
+  QCOMPARE(unconfiguredRows.size(), std::size_t{1});
+  QVERIFY(!unconfiguredRows.front().isProtected);
 
   wmi.queryResults.push_back({volumeRow(false, "C:", "Volume{c}", true, false, false, "a"), volumeRow(false, "c", "Volume{other}", true, false, false, "b")});
   QVERIFY_THROWS_EXCEPTION(WmiProtocolError, (void)volume.readAll());

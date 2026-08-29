@@ -28,8 +28,8 @@ namespace uwf::api {
 namespace {
 
 api::FilterRow decodeFilter(const WmiRow& source) {
-  return {rowutil::requireString(source, "__PATH", rowutil::EmptyString::Reject), rowutil::requireBool(source, "CurrentEnabled"),
-          rowutil::requireBool(source, "NextEnabled")};
+  return {rowutil::requireString(source, "__PATH", rowutil::EmptyString::Reject), rowutil::requireBoolOrFalseIfNull(source, "CurrentEnabled"),
+          rowutil::requireBoolOrFalseIfNull(source, "NextEnabled")};
 }
 
 api::FilterRow rereadFilter(WmiOperations& session, const api::FilterRow& target) { return decodeFilter(session.getObject(target.path)); }

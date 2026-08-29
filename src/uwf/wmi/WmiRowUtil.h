@@ -52,6 +52,7 @@ std::vector<T> readArrayOutput(const WmiMethodOutput& output, const char* arrayK
 enum class EmptyString { Allow, Reject };
 
 bool requireBool(const WmiRow& r, const std::string& key);
+bool requireBoolOrFalseIfNull(const WmiRow& r, const std::string& key);
 int32_t requireInt(const WmiRow& r, const std::string& key);
 uint32_t requireUInt(const WmiRow& r, const std::string& key);
 uint64_t requireUInt64(const WmiRow& r, const std::string& key);

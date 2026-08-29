@@ -54,6 +54,14 @@ bool requireBool(const WmiRow& r, const std::string& key) {
   return it->second.toBool();
 }
 
+bool requireBoolOrFalseIfNull(const WmiRow& r, const std::string& key) {
+  const auto it = r.find(key);
+  if (it == r.end()) throwFieldError(key, "is missing");
+  if (!it->second.isValid()) return false;
+  if (it->second.kind() != WmiValue::Kind::Bool) throwFieldError(key, "has the wrong type");
+  return it->second.toBool();
+}
+
 int32_t requireInt(const WmiRow& r, const std::string& key) {
   const auto it = r.find(key);
   if (it == r.end() || !isIntegerLike(it->second.kind())) throwFieldError(key, it == r.end() ? "is missing" : "has the wrong type");

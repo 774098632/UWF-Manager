@@ -72,7 +72,7 @@ std::optional<api::VolumeRow> decodeManagedVolume(const WmiRow& source) {
                         volumeName,
                         rowutil::requireBool(source, "BindByDriveLetter"),
                         rowutil::requireBool(source, "CommitPending"),
-                        rowutil::requireBool(source, "Protected")};
+                        rowutil::requireBoolOrFalseIfNull(source, "Protected")};
 }
 
 api::VolumeRow rereadVolume(WmiOperations& session, const api::VolumeRow& target) {
