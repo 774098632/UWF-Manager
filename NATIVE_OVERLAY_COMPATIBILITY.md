@@ -110,6 +110,15 @@ SetOverlayFlags requires the *current* filter to be disabled. Setting only the
 next filter to disabled is insufficient. Enable/disable reads next flags,
 changes only bit `0x2`, writes once, and requires an exact read-back match.
 
+The native flags setter also updates the corresponding UWF boot-persistence
+BCD element (`0x16000085`). BCD open/set failures propagate as HRESULT failures;
+the static flags may already have changed when this occurs. A later auxiliary
+UWF registry-driver commit return is not propagated by the native setter.
+Read-back confirms next configuration flags, not independent BCD persistence
+or boot behavior. The required disabled-filter session avoids intentionally
+scheduling this configuration change through an active protected overlay;
+real reboot validation remains necessary.
+
 Restore requires refreshed current/next WMI state with enabled filters, Disk
 overlay and protected volumes, plus persistent bit `0x2` in both configurations.
 Read-only media/HORM configurations are refused. Reset uses literal mode 1;
