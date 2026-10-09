@@ -22,6 +22,14 @@
 
 ## 验证边界
 
+### 原生报告没有输出或返回拒绝访问
+
+先在目标电脑的管理员 CMD 中运行 `"%windir%\System32\uwfmgr.exe" overlay get-config`，再单独运行 `echo ExitCode=%errorlevel%`。`-2147024891` 对应 `0x80070005`（拒绝访问），不能仅凭这个状态判断系统组件崩溃。
+
+如果以管理员身份仍失败，用管理员 PowerShell 分别只读查询 `Get-CimInstance -Namespace 'root\standardcimv2\embedded' -ClassName UWF_Filter` 和 `Get-CimInstance -Namespace 'root\standardcimv2\embedded' -ClassName UWF_OverlayConfig`，记录 Windows 版本及查询结果，继续区分原生命令与 WMI 接口的故障。程序会保留异常终止时的十进制/十六进制状态；HRESULT 的 Win32 错误会附带系统描述。显示准确错误不代表已修复目标电脑的访问权限。
+
+### 构建与真实设备验证
+
 云端构建与隔离测试验证命令参数、失败停止、权限/类型门禁、用户取消、服务确认和跳过暂存。测试用内存接口替代真实命令和 WMI 写入，不执行真实重启或保护配置修改。
 
 仍须在实际 UWF 测试设备验证：

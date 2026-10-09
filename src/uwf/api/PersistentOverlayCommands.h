@@ -27,8 +27,9 @@ enum class PersistentOverlayAction { GetConfig, Enable, Disable, Reset, CancelRe
 struct PersistentOverlayCommandResult {
   int exitCode = -1;
   QString output;
+  bool executionFailed = false;
 
-  [[nodiscard]] bool succeeded() const { return exitCode == 0; }
+  [[nodiscard]] bool succeeded() const { return exitCode == 0 && !executionFailed; }
 };
 
 // Microsoft documents persistent-overlay controls through uwfmgr.exe. Its

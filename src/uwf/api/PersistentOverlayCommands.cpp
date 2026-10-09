@@ -72,6 +72,26 @@ void appendFailure(QString& output, const QString& failure) {
   output.append(failure);
 }
 
+QString windowsFailureStatus(const int exitCode) {
+  const DWORD status = static_cast<DWORD>(exitCode);
+  QString detail = QStringLiteral("uwfmgr.exe returned Windows status %1 (0x%2)")
+                       .arg(exitCode)
+                       .arg(static_cast<qulonglong>(status), 8, 16, QLatin1Char('0'));
+  // uwfmgr can return HRESULT_FROM_WIN32 errors, which Qt classifies as
+  // CrashExit because the high bit is set. Preserve that status and decode
+  // its Win32 portion; it does not by itself prove an application crash.
+  if ((status & 0xffff0000UL) == 0x80070000UL) {
+    std::wstring message(2048, L'\0');
+    const DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, status & 0xffffUL, 0,
+                                       message.data(), static_cast<DWORD>(message.size()), nullptr);
+    if (length) {
+      message.resize(length);
+      detail += QStringLiteral(": ") + QString::fromStdWString(message).trimmed();
+    }
+  }
+  return detail;
+}
+
 void stopProcess(QProcess& process) {
   if (process.state() == QProcess::NotRunning) return;
   process.kill();
@@ -123,6 +143,7 @@ QStringList NativePersistentOverlayCommands::arguments(const PersistentOverlayAc
 
 PersistentOverlayCommandResult NativePersistentOverlayCommands::execute(const PersistentOverlayAction action) {
   PersistentOverlayCommandResult result;
+  result.executionFailed = true;
   try {
     const QStringList commandArguments = arguments(action);
     QProcess process;
@@ -150,14 +171,17 @@ PersistentOverlayCommandResult NativePersistentOverlayCommands::execute(const Pe
                              : QStringLiteral("uwfmgr.exe did not finish normally: %1").arg(error));
       return result;
     }
+    // The Windows Qt backend retains GetExitCodeProcess's DWORD even when
+    // it labels a returned HRESULT as CrashExit. Capture it before decoding
+    // output so a report-format failure cannot hide the native status.
+    result.exitCode = process.exitCode();
     result.output = decodeOutput(process.readAll());
     if (process.exitStatus() != QProcess::NormalExit) {
-      appendFailure(result.output, QStringLiteral("uwfmgr.exe terminated unexpectedly: %1").arg(process.errorString()));
+      appendFailure(result.output, windowsFailureStatus(result.exitCode));
       return result;
     }
-    result.exitCode = process.exitCode();
+    result.executionFailed = false;
   } catch (const std::exception& error) {
-    result.exitCode = -1;
     appendFailure(result.output, QString::fromUtf8(error.what()));
   }
   return result;

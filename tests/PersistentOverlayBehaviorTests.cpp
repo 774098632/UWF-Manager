@@ -82,6 +82,10 @@ void PersistentOverlayBehaviorTests::successRequiresExactlyZeroExitCode() {
   }
   QVERIFY((PersistentOverlayCommandResult{0, QStringLiteral("OFF")}.succeeded()));
   QVERIFY((PersistentOverlayCommandResult{0, QString{}}.succeeded()));
+  // A transport/decoding failure cannot authorize the next destructive step,
+  // even if the process status retained alongside it happens to be zero.
+  QVERIFY((!PersistentOverlayCommandResult{0, QStringLiteral("Invalid output"), true}.succeeded()));
+  QVERIFY((!PersistentOverlayCommandResult{-2147024891, QStringLiteral("Access denied"), true}.succeeded()));
 }
 
 void PersistentOverlayBehaviorTests::commandBoundaryPreservesLocalizedEvidenceAndFailures() {
