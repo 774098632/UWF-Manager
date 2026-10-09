@@ -20,7 +20,9 @@
 
 #include <QByteArray>
 #include <QProcess>
+#include <QStringDecoder>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -52,7 +54,7 @@ QString nativeUwfmgrPath() {
   return QString::fromStdWString(windowsDir);
 }
 
-QString decodeCommandOutput(const QByteArray& bytes) {
+QString decodeOemOutput(const QByteArray& bytes) {
   if (bytes.isEmpty()) return {};
   if (bytes.size() > std::numeric_limits<int>::max()) throw std::length_error("uwfmgr.exe output is too large to decode");
   const int byteCount = static_cast<int>(bytes.size());
@@ -77,6 +79,26 @@ void stopProcess(QProcess& process) {
 }
 
 }  // namespace
+
+QString NativePersistentOverlayCommands::decodeOutput(const QByteArray& bytes) {
+  // uwfmgr's documentation does not promise one redirected-output encoding.
+  // Honor an explicit Unicode signature without guessing from localized text
+  // or null-byte frequency. A complete output buffer is decoded statelessly
+  // so a truncated Unicode sequence is detected instead of silently dropped.
+  std::optional<QStringConverter::Encoding> encoding;
+  if (bytes.startsWith("\xEF\xBB\xBF"))
+    encoding = QStringConverter::Utf8;
+  else if (bytes.startsWith("\xFF\xFE"))
+    encoding = QStringConverter::Utf16LE;
+  else if (bytes.startsWith("\xFE\xFF"))
+    encoding = QStringConverter::Utf16BE;
+  if (!encoding) return decodeOemOutput(bytes);
+
+  QStringDecoder decoder(*encoding, QStringConverter::Flag::Stateless);
+  const QString output = decoder(bytes);
+  if (decoder.hasError()) throw std::runtime_error("uwfmgr.exe output contains an invalid or truncated Unicode sequence");
+  return output;
+}
 
 QStringList NativePersistentOverlayCommands::arguments(const PersistentOverlayAction action) {
   switch (action) {
@@ -107,7 +129,7 @@ PersistentOverlayCommandResult NativePersistentOverlayCommands::execute(const Pe
     if (!process.waitForStarted(kStartTimeoutMs)) {
       const QString error = process.errorString();
       stopProcess(process);
-      result.output = decodeCommandOutput(process.readAll());
+      result.output = decodeOutput(process.readAll());
       appendFailure(result.output, QStringLiteral("uwfmgr.exe could not be started: %1").arg(error));
       return result;
     }
@@ -117,13 +139,13 @@ PersistentOverlayCommandResult NativePersistentOverlayCommands::execute(const Pe
       const bool timedOut = process.error() == QProcess::Timedout;
       const QString error = process.errorString();
       stopProcess(process);
-      result.output = decodeCommandOutput(process.readAll());
+      result.output = decodeOutput(process.readAll());
       appendFailure(result.output,
                     timedOut ? QStringLiteral("uwfmgr.exe timed out after 30 seconds. The command outcome is unknown; inspect the configuration before retrying.")
                              : QStringLiteral("uwfmgr.exe did not finish normally: %1").arg(error));
       return result;
     }
-    result.output = decodeCommandOutput(process.readAll());
+    result.output = decodeOutput(process.readAll());
     if (process.exitStatus() != QProcess::NormalExit) {
       appendFailure(result.output, QStringLiteral("uwfmgr.exe terminated unexpectedly: %1").arg(process.errorString()));
       return result;

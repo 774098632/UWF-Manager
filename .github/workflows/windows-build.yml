@@ -55,7 +55,7 @@ jobs:
 
       - name: Build application and behavior tests
         run: >-
-          cmake --build build --parallel 2 --target
+          cmake --build build --parallel 4 --target
           UWF UwfCoreBehaviorTests UwfWmiApiBehaviorTests
           UwfPersistentOverlayBehaviorTests UwfPersistentOverlayDialogTests
           UwfApplicationUiBehaviorTests
@@ -70,7 +70,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: >-
-          ./build/tests/UwfApplicationUiBehaviorTests.exe persistentRestoreSkipsStagingAndStopsOnFailure
+          ./build/UwfApplicationUiBehaviorTests.exe persistentRestoreSkipsStagingAndStopsOnFailure safePowerActionsRequireConfirmationAndUseTheInjectedTransport
           -o build/persistent-restore-results.txt,txt
 
       - name: Package portable application and matching source

@@ -124,7 +124,9 @@ void PowerController::restorePersistentOverlay(api::PersistentOverlayCommands& c
       throw std::runtime_error(I18n::tr("Enhanced mode did not confirm skipping file staging. Restore was not scheduled").toStdString());
     resetAttempted = true;
     const auto result = commands.execute(api::PersistentOverlayAction::Reset);
-    if (!result.succeeded()) throw std::runtime_error(result.output.toStdString());
+    if (!result.succeeded()) {
+      throw std::runtime_error((I18n::tr("Persistent overlay command failed (exit code %1).").arg(result.exitCode) + "\n" + result.output).toStdString());
+    }
     UWF_LOG_I("power") << "persistent overlay reset command accepted; restarting without file staging";
     filter.restartSystem(filterRow);
     restartAccepted = true;

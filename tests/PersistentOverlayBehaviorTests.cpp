@@ -47,6 +47,9 @@ class PersistentOverlayBehaviorTests final : public QObject {
   void invalidActionCannotMapToAWrite();
   void successRequiresExactlyZeroExitCode();
   void commandBoundaryPreservesLocalizedEvidenceAndFailures();
+  void explicitUnicodeBomPreservesChineseAndSurrogatePairs();
+  void unmarkedOutputStillUsesTheOemFallback();
+  void truncatedMarkedUnicodeIsRejected();
 };
 
 void PersistentOverlayBehaviorTests::actionsUseOnlyDocumentedOverlayCommands() {
@@ -105,6 +108,33 @@ void PersistentOverlayBehaviorTests::commandBoundaryPreservesLocalizedEvidenceAn
            (QList<PersistentOverlayAction>{PersistentOverlayAction::GetConfig, PersistentOverlayAction::Enable, PersistentOverlayAction::Reset,
                                           PersistentOverlayAction::CancelReset}));
   QVERIFY(scripted.outcomes.isEmpty());
+}
+
+void PersistentOverlayBehaviorTests::explicitUnicodeBomPreservesChineseAndSurrogatePairs() {
+  const QString expected = QString::fromUtf8("启用\r\n🧪");
+  const QByteArray utf16le = QByteArray::fromHex("fffe2f5428750d000a003ed8eadd");
+  const QByteArray utf16be = QByteArray::fromHex("feff542f7528000d000ad83eddea");
+  const QByteArray utf8 = QByteArray::fromHex("efbbbf") + expected.toUtf8();
+  QCOMPARE(NativePersistentOverlayCommands::decodeOutput(utf16le), expected);
+  QCOMPARE(NativePersistentOverlayCommands::decodeOutput(utf16be), expected);
+  QCOMPARE(NativePersistentOverlayCommands::decodeOutput(utf8), expected);
+  for (const QByteArray& bom : {QByteArray::fromHex("fffe"), QByteArray::fromHex("feff"), QByteArray::fromHex("efbbbf")}) {
+    QVERIFY(NativePersistentOverlayCommands::decodeOutput(bom).isEmpty());
+  }
+}
+
+void PersistentOverlayBehaviorTests::unmarkedOutputStillUsesTheOemFallback() {
+  QVERIFY(NativePersistentOverlayCommands::decodeOutput({}).isEmpty());
+  QCOMPARE(NativePersistentOverlayCommands::decodeOutput(QByteArray("Persistent overlay: OFF\r\n")), QStringLiteral("Persistent overlay: OFF\r\n"));
+  // Unmarked NUL bytes do not trigger a UTF-16 heuristic, which could otherwise
+  // reinterpret incomplete or mixed console evidence as a different encoding.
+  QCOMPARE(NativePersistentOverlayCommands::decodeOutput(QByteArray("A\0B\0", 4)), QString::fromLatin1("A\0B\0", 4));
+}
+
+void PersistentOverlayBehaviorTests::truncatedMarkedUnicodeIsRejected() {
+  for (const QByteArray& bytes : {QByteArray::fromHex("fffe2f"), QByteArray::fromHex("feff54"), QByteArray::fromHex("efbbbfe590")}) {
+    QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(NativePersistentOverlayCommands::decodeOutput(bytes)));
+  }
 }
 
 }  // namespace

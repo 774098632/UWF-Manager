@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include <QByteArray>
 #include <QString>
 #include <QStringList>
 
@@ -42,6 +43,9 @@ class NativePersistentOverlayCommands final : public PersistentOverlayCommands {
  public:
   [[nodiscard]] PersistentOverlayCommandResult execute(PersistentOverlayAction action) override;
   [[nodiscard]] static QStringList arguments(PersistentOverlayAction action);
+  // Explicit Unicode BOMs determine encoding; unmarked native-console output
+  // uses the Windows OEM code page. This never interprets configuration text.
+  [[nodiscard]] static QString decodeOutput(const QByteArray& bytes);
 };
 
 }  // namespace uwf::api
