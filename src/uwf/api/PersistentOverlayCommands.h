@@ -47,6 +47,11 @@ class NativePersistentOverlayCommands final : public PersistentOverlayCommands {
   // Explicit Unicode BOMs determine encoding; unmarked native-console output
   // uses the Windows OEM code page. This never interprets configuration text.
   [[nodiscard]] static QString decodeOutput(const QByteArray& bytes);
+  [[nodiscard]] static PersistentOverlayCommandResult decodeWorkerResult(const PersistentOverlayCommandResult& processResult);
+
+ private:
+  bool m_backendSelected = false;
+  bool m_useConfigurationLibrary = false;
 };
 
 }  // namespace uwf::api

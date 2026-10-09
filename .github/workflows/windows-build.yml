@@ -58,13 +58,14 @@ jobs:
           cmake --build build --parallel 4 --target
           UWF UwfCoreBehaviorTests UwfWmiApiBehaviorTests
           UwfPersistentOverlayBehaviorTests UwfPersistentOverlayDialogTests
+          UwfPersistentOverlayLibraryTests
           UwfApplicationUiBehaviorTests
 
       - name: Run core, in-memory WMI and persistent overlay behavior tests
         # These suites use in-memory WMI operations and do not change host UWF settings.
         run: >-
           ctest --test-dir build --output-on-failure --no-tests=error
-          --timeout 120 -R '^(UwfCoreBehaviorTests|UwfWmiApiBehaviorTests|UwfPersistentOverlayBehaviorTests|UwfPersistentOverlayDialogTests)$'
+          --timeout 120 -R '^(UwfCoreBehaviorTests|UwfWmiApiBehaviorTests|UwfPersistentOverlayBehaviorTests|UwfPersistentOverlayDialogTests|UwfPersistentOverlayLibraryTests)$'
 
       - name: Verify restore bypasses file staging and handles reset failure
         env:
@@ -98,6 +99,7 @@ jobs:
             build/Testing/Temporary/
             build/persistent-overlay-results.txt
             build/persistent-overlay-dialog-results.txt
+            build/persistent-overlay-library-results.txt
             build/persistent-restore-results.txt
           if-no-files-found: ignore
           retention-days: 14

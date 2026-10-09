@@ -165,6 +165,9 @@ QString PersistentOverlayDialog::enableBlocker() const {
   if (m_snapshot.next.overlay.type != core::OverlayType::Disk)
     return I18n::tr("Apply Disk as the next overlay type before enabling persistence. To change overlay type, disable UWF, apply and restart; then select "
                     "Disk, apply, and enable protection for the next boot.");
+  if (m_snapshot.current.filter.enabled)
+    return I18n::tr("To change persistence, disable UWF, apply and restart first. Uncommitted overlay changes may be lost on that restart. Then configure "
+                    "persistence while UWF is disabled in the current session, before enabling protection again.");
   return {};
 }
 
@@ -184,8 +187,8 @@ void PersistentOverlayDialog::updateActions() {
   const QString restoringBlocker = resetBlocker();
   m_enableButton->setEnabled(enablingBlocker.isEmpty());
   m_enableButton->setToolTip(enablingBlocker);
-  m_disableButton->setEnabled(baseBlocker.isEmpty());
-  m_disableButton->setToolTip(baseBlocker);
+  m_disableButton->setEnabled(enablingBlocker.isEmpty());
+  m_disableButton->setToolTip(enablingBlocker);
   m_cancelResetButton->setEnabled(baseBlocker.isEmpty());
   m_cancelResetButton->setToolTip(baseBlocker);
   m_resetButton->setEnabled(restoringBlocker.isEmpty());
@@ -230,7 +233,7 @@ void PersistentOverlayDialog::setFeedback(const QString& message, const bool fai
 }
 
 void PersistentOverlayDialog::runAction(const api::PersistentOverlayAction action) {
-  const QString blocker = action == api::PersistentOverlayAction::Enable   ? enableBlocker()
+  const QString blocker = (action == api::PersistentOverlayAction::Enable || action == api::PersistentOverlayAction::Disable) ? enableBlocker()
                           : action == api::PersistentOverlayAction::Reset ? resetBlocker()
                                                                           : mutationBlocker();
   if (!blocker.isEmpty()) {

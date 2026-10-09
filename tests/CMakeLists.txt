@@ -14,6 +14,16 @@ qt_add_executable(UwfPersistentOverlayBehaviorTests
         PersistentOverlayBehaviorTests.cpp
         ../src/uwf/api/PersistentOverlayCommands.cpp
 )
+
+qt_add_executable(UwfPersistentOverlayLibraryTests
+        PersistentOverlayLibraryTests.cpp
+        ../src/uwf/api/PersistentOverlayLibrary.cpp
+)
+target_include_directories(UwfPersistentOverlayLibraryTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(UwfPersistentOverlayLibraryTests PRIVATE Qt6::Core Qt6::Test)
+uwf_configure_cpp_target(UwfPersistentOverlayLibraryTests)
+add_test(NAME UwfPersistentOverlayLibraryTests COMMAND UwfPersistentOverlayLibraryTests
+        -o "${PROJECT_BINARY_DIR}/persistent-overlay-library-results.txt,txt")
 target_include_directories(UwfPersistentOverlayBehaviorTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(UwfPersistentOverlayBehaviorTests PRIVATE Qt6::Core Qt6::Test)
 uwf_configure_cpp_target(UwfPersistentOverlayBehaviorTests)

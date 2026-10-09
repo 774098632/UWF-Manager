@@ -15,6 +15,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <QtTest>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <limits>
 #include <stdexcept>
 
@@ -26,6 +28,18 @@ using uwf::api::NativePersistentOverlayCommands;
 using uwf::api::PersistentOverlayAction;
 using uwf::api::PersistentOverlayCommandResult;
 using uwf::api::PersistentOverlayCommands;
+
+QJsonObject workerFrame(const PersistentOverlayCommandResult& result) {
+  return {{QStringLiteral("protocol"), 1},
+          {QStringLiteral("exitCode"), result.exitCode},
+          {QStringLiteral("executionFailed"), result.executionFailed},
+          {QStringLiteral("output"), result.output}};
+}
+
+PersistentOverlayCommandResult workerTransport(const QJsonObject& frame, const int processExitCode) {
+  const QByteArray markedUtf8 = QByteArray::fromHex("efbbbf") + QJsonDocument(frame).toJson(QJsonDocument::Compact);
+  return {processExitCode, NativePersistentOverlayCommands::decodeOutput(markedUtf8), false};
+}
 
 class ScriptedPersistentOverlayCommands final : public PersistentOverlayCommands {
  public:
@@ -50,6 +64,10 @@ class PersistentOverlayBehaviorTests final : public QObject {
   void explicitUnicodeBomPreservesChineseAndSurrogatePairs();
   void unmarkedOutputStillUsesTheOemFallback();
   void truncatedMarkedUnicodeIsRejected();
+  void workerProtocolPreservesSuccessFailureAndChineseOutput();
+  void incompleteWorkerExecutionCannotAuthorizeSuccess();
+  void malformedWorkerProtocolIsRejected();
+  void workerProcessAndPayloadStatusMustAgree();
 };
 
 void PersistentOverlayBehaviorTests::actionsUseOnlyDocumentedOverlayCommands() {
@@ -138,6 +156,120 @@ void PersistentOverlayBehaviorTests::unmarkedOutputStillUsesTheOemFallback() {
 void PersistentOverlayBehaviorTests::truncatedMarkedUnicodeIsRejected() {
   for (const QByteArray& bytes : {QByteArray::fromHex("fffe2f"), QByteArray::fromHex("feff54"), QByteArray::fromHex("efbbbfe590")}) {
     QVERIFY_THROWS_EXCEPTION(std::runtime_error, static_cast<void>(NativePersistentOverlayCommands::decodeOutput(bytes)));
+  }
+}
+
+void PersistentOverlayBehaviorTests::workerProtocolPreservesSuccessFailureAndChineseOutput() {
+  const QString configuration = QString::fromUtf8("本次会话：持久覆盖层已启用\n下次启动：恢复🧪\n");
+  const auto success = NativePersistentOverlayCommands::decodeWorkerResult(workerTransport(workerFrame({0, configuration, false}), 0));
+  QVERIFY(success.succeeded());
+  QCOMPARE(success.output, configuration);
+  QCOMPARE(success.exitCode, 0);
+  QVERIFY(!success.executionFailed);
+
+  const QString denied = QString::fromUtf8("访问被拒绝。保留原始状态 0x80070005。\n");
+  const auto failure = NativePersistentOverlayCommands::decodeWorkerResult(workerTransport(workerFrame({-2147024891, denied, true}), 1));
+  QVERIFY(!failure.succeeded());
+  QCOMPARE(failure.output, denied);
+  QCOMPARE(failure.exitCode, -2147024891);
+  QVERIFY(failure.executionFailed);
+
+  // The protocol transports the full signed Windows status range, while an
+  // execution failure remains a failure even if its retained status is zero.
+  for (const int status : {std::numeric_limits<int>::min(), std::numeric_limits<int>::max(), 0, 1}) {
+    const auto result = NativePersistentOverlayCommands::decodeWorkerResult(workerTransport(workerFrame({status, denied, true}), 1));
+    QVERIFY(!result.succeeded());
+    QCOMPARE(result.exitCode, status);
+    QCOMPARE(result.output, denied);
+    QVERIFY(result.executionFailed);
+  }
+  const auto normalFailure = NativePersistentOverlayCommands::decodeWorkerResult(workerTransport(workerFrame({5, denied, false}), 1));
+  QVERIFY(!normalFailure.succeeded());
+  QCOMPARE(normalFailure.exitCode, 5);
+  QVERIFY(!normalFailure.executionFailed);
+}
+
+void PersistentOverlayBehaviorTests::incompleteWorkerExecutionCannotAuthorizeSuccess() {
+  const auto completeFrame = workerTransport(workerFrame({0, QStringLiteral("Reset scheduled"), false}), 0);
+  // Zero can accompany a decoding/transport failure; a timeout retains the
+  // sentinel; CrashExit can retain an access violation or an HRESULT. None
+  // may consume the JSON frame, even if all success fields look complete.
+  for (const int retainedStatus : {0, -1, -1073741819, -2147024891}) {
+    const PersistentOverlayCommandResult failedTransport{retainedStatus, completeFrame.output, true};
+    const auto result = NativePersistentOverlayCommands::decodeWorkerResult(failedTransport);
+    QVERIFY(!result.succeeded());
+    QVERIFY(result.executionFailed);
+    QCOMPARE(result.exitCode, retainedStatus);
+    QCOMPARE(result.output, failedTransport.output);
+  }
+}
+
+void PersistentOverlayBehaviorTests::malformedWorkerProtocolIsRejected() {
+  const auto validFrame = workerFrame({0, QStringLiteral("Success"), false});
+  const auto changedField = [&validFrame](const QString& field, const QJsonValue& value) {
+    auto frame = validFrame;
+    frame.insert(field, value);
+    return frame;
+  };
+  QList<QJsonObject> invalidFrames;
+  auto missingOutput = validFrame;
+  missingOutput.remove(QStringLiteral("output"));
+  invalidFrames.append(missingOutput);
+  auto extraField = validFrame;
+  extraField.insert(QStringLiteral("unrecognized"), true);
+  invalidFrames.append(extraField);
+  auto wrongField = validFrame;
+  wrongField.remove(QStringLiteral("output"));
+  wrongField.insert(QStringLiteral("stdout"), QStringLiteral("Success"));
+  invalidFrames.append(wrongField);
+  for (const QJsonValue& protocol : {QJsonValue(0), QJsonValue(2), QJsonValue(QStringLiteral("1")), QJsonValue(true), QJsonValue()})
+    invalidFrames.append(changedField(QStringLiteral("protocol"), protocol));
+  for (const QJsonValue& status : {QJsonValue(0.5), QJsonValue(static_cast<double>(std::numeric_limits<int>::max()) + 1.0),
+                                 QJsonValue(static_cast<double>(std::numeric_limits<int>::min()) - 1.0),
+                                 QJsonValue(QStringLiteral("0")), QJsonValue(false), QJsonValue()})
+    invalidFrames.append(changedField(QStringLiteral("exitCode"), status));
+  for (const QJsonValue& flag : {QJsonValue(QStringLiteral("false")), QJsonValue(0), QJsonValue()})
+    invalidFrames.append(changedField(QStringLiteral("executionFailed"), flag));
+  for (const QJsonValue& output : {QJsonValue(0), QJsonValue(false), QJsonValue(), QJsonValue(QJsonObject{})})
+    invalidFrames.append(changedField(QStringLiteral("output"), output));
+  for (const auto& frame : invalidFrames) {
+    const auto result = NativePersistentOverlayCommands::decodeWorkerResult(workerTransport(frame, 0));
+    QVERIFY(!result.succeeded());
+    QVERIFY(result.executionFailed);
+    QCOMPARE(result.exitCode, -1);
+    QVERIFY(result.output.contains(QStringLiteral("invalid report")));
+  }
+
+  const QString validJson = QString::fromUtf8(QJsonDocument(validFrame).toJson(QJsonDocument::Compact));
+  const QStringList invalidJson = {QString{}, QStringLiteral("{}"), QStringLiteral("[]"), QStringLiteral("null"),
+                                  validJson.left(validJson.size() - 1), validJson + QStringLiteral(" trailing data"),
+                                  QStringLiteral("{\"protocol\":1,\"exitCode\":NaN,\"executionFailed\":false,\"output\":\"Success\"}"),
+                                  QStringLiteral("{\"protocol\":1,\"exitCode\":1e400,\"executionFailed\":false,\"output\":\"Success\"}")};
+  for (const auto& output : invalidJson) {
+    const auto result = NativePersistentOverlayCommands::decodeWorkerResult({0, output, false});
+    QVERIFY(!result.succeeded());
+    QVERIFY(result.executionFailed);
+    QCOMPARE(result.exitCode, -1);
+    QVERIFY(result.output.contains(QStringLiteral("invalid report")));
+  }
+}
+
+void PersistentOverlayBehaviorTests::workerProcessAndPayloadStatusMustAgree() {
+  const auto successFrame = workerFrame({0, QStringLiteral("Reset scheduled"), false});
+  const auto failureFrame = workerFrame({-2147024891, QStringLiteral("Access denied"), true});
+  for (const int processStatus : {1, 2, -1}) {
+    const auto result = NativePersistentOverlayCommands::decodeWorkerResult(workerTransport(successFrame, processStatus));
+    QVERIFY(!result.succeeded());
+    QVERIFY(result.executionFailed);
+    QCOMPARE(result.exitCode, -1);
+    QVERIFY(result.output.contains(QStringLiteral("inconsistent status")));
+  }
+  for (const int processStatus : {0, 2, -1}) {
+    const auto result = NativePersistentOverlayCommands::decodeWorkerResult(workerTransport(failureFrame, processStatus));
+    QVERIFY(!result.succeeded());
+    QVERIFY(result.executionFailed);
+    QCOMPARE(result.exitCode, -1);
+    QVERIFY(result.output.contains(QStringLiteral("inconsistent status")));
   }
 }
 

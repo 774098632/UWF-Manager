@@ -134,6 +134,10 @@ set(UWF_SOURCES
         src/uwf/api/UwfmgrCli.cpp
         src/uwf/api/PersistentOverlayCommands.h
         src/uwf/api/PersistentOverlayCommands.cpp
+        src/uwf/api/PersistentOverlayLibrary.h
+        src/uwf/api/PersistentOverlayLibrary.cpp
+        src/uwf/api/PersistentOverlayNative.h
+        src/uwf/api/PersistentOverlayNative.cpp
         src/uwf/UwfSnapshot.h
         src/uwf/UwfSnapshot.cpp
         src/uwf/FileStagingCommitter.h

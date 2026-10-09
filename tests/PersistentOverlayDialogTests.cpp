@@ -77,6 +77,7 @@ class PersistentOverlayDialogTests final : public QObject {
   void initTestCase();
   void nativeReportIsReadOnlyAndUnmodified();
   void enablingRequiresElevationAndAppliedDiskType();
+  void pendingDisableDoesNotAllowChangingPersistence();
   void resetRequiresProtectionInBothSessions();
   void cancelledDestructiveActionsDoNotExecute();
   void successfulMutationRefreshesAndSignals();
@@ -98,8 +99,8 @@ void PersistentOverlayDialogTests::nativeReportIsReadOnlyAndUnmodified() {
   QVERIFY(report->isReadOnly());
   QCOMPARE(report->toPlainText(), commands.nativeReport);
   // Report language or contradictory words must not infer command state.
-  QVERIFY(actionButton(dialog, "Enable")->isEnabled());
-  QVERIFY(actionButton(dialog, "Disable")->isEnabled());
+  QVERIFY(!actionButton(dialog, "Enable")->isEnabled());
+  QVERIFY(!actionButton(dialog, "Disable")->isEnabled());
   QVERIFY(actionButton(dialog, "CancelReset")->isEnabled());
   QCOMPARE(commands.actions, std::vector<Action>{Action::GetConfig});
 }
@@ -123,10 +124,47 @@ void PersistentOverlayDialogTests::enablingRequiresElevationAndAppliedDiskType()
 
   // A scheduled Disk session may be enabled while the current session is RAM.
   snapshot.current.overlay.type = uwf::core::OverlayType::RAM;
+  snapshot.current.filter.enabled = false;
   snapshot.next.overlay.type = uwf::core::OverlayType::Disk;
   Dialog pendingDisk(commands, snapshot);
   QVERIFY(actionButton(pendingDisk, "Enable")->isEnabled());
   QVERIFY(!actionButton(pendingDisk, "Reset")->isEnabled());
+}
+
+void PersistentOverlayDialogTests::pendingDisableDoesNotAllowChangingPersistence() {
+  MemoryCommands commands;
+  auto snapshot = protectedDiskSnapshot();
+  // Applying a pending disable has not turned off this session's driver yet.
+  snapshot.next.filter.enabled = false;
+  Dialog dialog(commands, snapshot);
+  QSignalSpy changed(&dialog, &Dialog::configurationChanged);
+  for (const char* action : {"Enable", "Disable"}) {
+    auto* button = actionButton(dialog, action);
+    QVERIFY(button);
+    QVERIFY(!button->isEnabled());
+    QVERIFY(button->toolTip().contains(QStringLiteral("disable UWF, apply and restart")));
+    button->click();
+    QCOMPARE(commands.actions, std::vector<Action>{Action::GetConfig});
+
+    // The action handler also refuses a stale or externally enabled button.
+    bool confirmationShown = false;
+    QTimer confirmationGuard;
+    confirmationGuard.setSingleShot(true);
+    connect(&confirmationGuard, &QTimer::timeout, &dialog, [&confirmationShown] {
+      if (auto* confirmation = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+        confirmationShown = true;
+        confirmation->reject();
+      }
+    });
+    confirmationGuard.start(0);
+    button->setEnabled(true);
+    button->click();
+    confirmationGuard.stop();
+    QVERIFY(!confirmationShown);
+    QCOMPARE(commands.actions, std::vector<Action>{Action::GetConfig});
+  }
+  QCOMPARE(changed.count(), 0);
+  QVERIFY(dialogText(dialog).contains(QStringLiteral("Uncommitted overlay changes may be lost")));
 }
 
 void PersistentOverlayDialogTests::resetRequiresProtectionInBothSessions() {
@@ -153,9 +191,11 @@ void PersistentOverlayDialogTests::resetRequiresProtectionInBothSessions() {
 
 void PersistentOverlayDialogTests::cancelledDestructiveActionsDoNotExecute() {
   MemoryCommands commands;
-  Dialog dialog(commands, protectedDiskSnapshot());
-  QSignalSpy changed(&dialog, &Dialog::configurationChanged);
   for (const char* action : {"Reset", "Disable"}) {
+    auto snapshot = protectedDiskSnapshot();
+    if (QString::fromLatin1(action) == QStringLiteral("Disable")) snapshot.current.filter.enabled = false;
+    Dialog dialog(commands, snapshot);
+    QSignalSpy changed(&dialog, &Dialog::configurationChanged);
     bool inspected = false;
     QTimer::singleShot(0, &dialog, [&inspected] {
       if (auto* confirmation = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
@@ -165,14 +205,16 @@ void PersistentOverlayDialogTests::cancelledDestructiveActionsDoNotExecute() {
     });
     actionButton(dialog, action)->click();
     QVERIFY(inspected);
+    QCOMPARE(changed.count(), 0);
   }
-  QCOMPARE(commands.actions, std::vector<Action>{Action::GetConfig});
-  QCOMPARE(changed.count(), 0);
+  QCOMPARE(commands.actions, (std::vector<Action>{Action::GetConfig, Action::GetConfig}));
 }
 
 void PersistentOverlayDialogTests::successfulMutationRefreshesAndSignals() {
   MemoryCommands commands;
-  Dialog dialog(commands, protectedDiskSnapshot());
+  auto snapshot = protectedDiskSnapshot();
+  snapshot.current.filter.enabled = false;
+  Dialog dialog(commands, snapshot);
   QSignalSpy changed(&dialog, &Dialog::configurationChanged);
   commands.nativeReport = QStringLiteral("Next persistent overlay: ON\n");
   actionButton(dialog, "Enable")->click();
@@ -184,7 +226,9 @@ void PersistentOverlayDialogTests::successfulMutationRefreshesAndSignals() {
 
 void PersistentOverlayDialogTests::failedMutationPreservesNativeReport() {
   MemoryCommands commands;
-  Dialog dialog(commands, protectedDiskSnapshot());
+  auto snapshot = protectedDiskSnapshot();
+  snapshot.current.filter.enabled = false;
+  Dialog dialog(commands, snapshot);
   QSignalSpy changed(&dialog, &Dialog::configurationChanged);
   commands.mutationResult = {5, QStringLiteral("Access denied")};
   actionButton(dialog, "Enable")->click();
@@ -197,7 +241,9 @@ void PersistentOverlayDialogTests::failedMutationPreservesNativeReport() {
 
 void PersistentOverlayDialogTests::transportExceptionIsDisplayedWithoutChangingConfiguration() {
   MemoryCommands commands;
-  Dialog dialog(commands, protectedDiskSnapshot());
+  auto snapshot = protectedDiskSnapshot();
+  snapshot.current.filter.enabled = false;
+  Dialog dialog(commands, snapshot);
   QSignalSpy changed(&dialog, &Dialog::configurationChanged);
   commands.throwOnMutation = true;
   actionButton(dialog, "Enable")->click();

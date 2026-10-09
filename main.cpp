@@ -18,6 +18,8 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QScopeGuard>
 #include <QTimer>
 #include <cstdint>
@@ -38,9 +40,39 @@
 #include "src/util/Log.h"
 #include "src/uwf/SystemCheck.h"
 #include "src/uwf/UwfSnapshot.h"
+#include "src/uwf/api/PersistentOverlayNative.h"
 #include "src/uwf/wmi/WmiClient.h"
 
 namespace {
+
+int runOverlayConfigurationWorker(int argc, char* argv[]) {
+  QCoreApplication app(argc, argv);
+  using Action = uwf::api::PersistentOverlayAction;
+  uwf::api::PersistentOverlayCommandResult result;
+  result.executionFailed = true;
+  try {
+    if (argc != 3) throw std::invalid_argument("Invalid overlay worker argument count.");
+    const QString command = QString::fromLocal8Bit(argv[2]);
+    std::optional<Action> action;
+    if (command == QStringLiteral("get-config")) action = Action::GetConfig;
+    else if (command == QStringLiteral("enable")) action = Action::Enable;
+    else if (command == QStringLiteral("disable")) action = Action::Disable;
+    else if (command == QStringLiteral("reset")) action = Action::Reset;
+    else if (command == QStringLiteral("cancel-reset")) action = Action::CancelReset;
+    if (!action) throw std::invalid_argument("Invalid overlay worker action.");
+    result = uwf::api::executeAuditedOverlayLibrary(*action);
+  } catch (const std::exception& error) {
+    result.output = QString::fromUtf8(error.what());
+  }
+  const QJsonObject frame{{QStringLiteral("protocol"), 1}, {QStringLiteral("exitCode"), result.exitCode},
+                          {QStringLiteral("executionFailed"), result.executionFailed}, {QStringLiteral("output"), result.output}};
+  const QByteArray bytes = QByteArray::fromHex("efbbbf") + QJsonDocument(frame).toJson(QJsonDocument::Compact);
+  DWORD written = 0;
+  const HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (output == nullptr || output == INVALID_HANDLE_VALUE ||
+      !WriteFile(output, bytes.constData(), static_cast<DWORD>(bytes.size()), &written, nullptr) || static_cast<qsizetype>(written) != bytes.size()) return EXIT_FAILURE;
+  return result.succeeded() ? EXIT_SUCCESS : EXIT_FAILURE;
+}
 
 void restrictDllSearchPath() {
   // Release 构建还通过 /DEPENDENTLOADFLAG:0x800 约束进入 main 前的静态
@@ -236,6 +268,10 @@ int runServiceControlCommand(int argc, char* argv[], const uwf::app::StartupMode
 int main(int argc, char* argv[]) {
   try {
     restrictDllSearchPath();
+    // The configuration worker deliberately runs before normal startup, single
+    // instance forwarding, enhanced-service setup and file-staging maintenance.
+    if (argc > 1 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--internal-overlay-configuration-worker"))
+      return runOverlayConfigurationWorker(argc, argv);
     const auto options = uwf::app::parseStartupOptions(startupArguments(argc, argv));
     switch (options.mode) {
       case uwf::app::StartupMode::Service:

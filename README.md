@@ -43,9 +43,11 @@ UWF is the supported successor to the older Enhanced Write Filter (EWF) and File
 
 ## Persistent overlay and manual restore (added in this fork)
 
-Open **Manual restore** in the toolbar. Apply a Disk overlay using the existing settings, enable persistence, and follow the prerequisite instructions to enable UWF and protect volumes. Restart for configuration changes to take effect. Normal restarts then retain overlay data; **Restore and restart** requests a reset for the next boot and restarts without committing File staging. Restoration still requires a reboot.
+Open **Manual restore** in the toolbar. Boot with UWF disabled in the current session, apply a Disk overlay using the existing settings, enable persistence, and follow the prerequisite instructions to enable UWF and protect volumes. Restart for configuration changes to take effect. Normal restarts then retain overlay data; **Restore and restart** requests a reset for the next boot and restarts without committing File staging. Restoration still requires a reboot.
 
 Excluded data and previously committed changes remain on physical storage. The enhanced-mode service must acknowledge skipping preshutdown staging before a restore restart can proceed. The dialog shows the native Windows configuration report without parsing localized text into assumed state. Microsoft marks persistent overlay as experimental; validate on a test device and monitor accumulating overlay usage. See [Microsoft documentation](https://learn.microsoft.com/en-us/windows/configuration/unified-write-filter/uwfoverlay) and the [Chinese setup and acceptance guide](MANUAL_RESTORE.zh_CN.md).
+
+If the CLI configuration read returns Access denied, an isolated worker can use an audited system configuration DLL. This fallback accepts one exact x64 DLL hash and verifies writes by reading back; unknown versions stop for diagnosis. No Windows components are bundled or replaced. See the [native compatibility audit](NATIVE_OVERLAY_COMPATIBILITY.md).
 
 ## Requirements
 
