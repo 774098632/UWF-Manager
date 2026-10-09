@@ -19,6 +19,7 @@
 #include <QScopeGuard>
 #include <QTimer>
 #include <QWidget>
+#include <algorithm>
 #include <exception>
 #include <optional>
 #include <stdexcept>
@@ -27,6 +28,8 @@
 #include "../util/Log.h"
 #include "../uwf/FileStagingTask.h"
 #include "../uwf/api/UwfFilter.h"
+#include "../uwf/api/UwfOverlayConfig.h"
+#include "../uwf/api/UwfVolume.h"
 #include "Dialogs.h"
 #include "FileStagingPresentation.h"
 #include "I18n.h"
@@ -45,11 +48,97 @@ PowerController::PowerController(PowerControllerServices services, QWidget* dial
       m_stagingCoordinator(services.stagingCoordinator),
       m_preshutdown(std::move(services.preshutdown)) {}
 
+PowerController::~PowerController() {
+  if (m_restoreBatch) {
+    app::ApplicationCommandResult rejected;
+    rejected.outcome = app::ApplicationCommandOutcome::Rejected;
+    rejected.detail = I18n::tr("File staging was skipped because manual restore was selected.");
+    m_restoreBatch->complete({rejected, std::nullopt});
+  }
+}
+
 void PowerController::safeShutdown() { execute(PowerAction::Shutdown); }
 
 void PowerController::safeRestart() { execute(PowerAction::Restart); }
 
 void PowerController::directRestart() { executeDirectRestart(); }
+
+void PowerController::restorePersistentOverlay(api::PersistentOverlayCommands& commands) {
+  if (m_actionActive || m_stagingCoordinator.active()) {
+    warning(m_dialogParent, I18n::tr("Manual restore"), I18n::tr("Wait for the active file staging or power operation to finish before restoring."));
+    return;
+  }
+  m_actionActive = true;
+  bool restartAccepted = false;
+  const auto releaseAction = qScopeGuard([&] { if (!restartAccepted) m_actionActive = false; });
+  // Reserve the same execution domain as automatic commits while confirming
+  // and resetting. A queued staging request must never commit the data being discarded.
+  auto batch = m_stagingCoordinator.reserveExternalBatch([](const FileStagingBatchResult&, FileStagingCoordinator::ExternalBatch) {});
+  if (!batch) return;
+  if (!dialogs::confirm(m_dialogParent, I18n::tr("Restore and restart"),
+                        I18n::tr("Discard the persistent overlay and restart now?\nUncommitted changes on protected volumes will be lost. Excluded paths and "
+                                 "previously committed changes are not restored. File staging will be skipped. Save work on an unprotected volume first."))) return;
+  app::ApplicationCommandResult rejected;
+  rejected.outcome = app::ApplicationCommandOutcome::Rejected;
+  rejected.detail = I18n::tr("File staging was skipped because manual restore was selected.");
+  const auto rejectQueuedStaging = qScopeGuard([&] { if (!restartAccepted) batch->complete({rejected, std::nullopt}); });
+  using ControlResult = PowerControllerServices::PreshutdownControlResult;
+  ControlResult skipResult = ControlResult::NotApplicable;
+  bool resetAttempted = false;
+  const auto revokeRestoreToken = [&] {
+    if (!restartAccepted && skipResult != ControlResult::NotApplicable && m_preshutdown.markRequired) {
+      try {
+        if (m_preshutdown.markRequired() == ControlResult::Unacknowledged)
+          UWF_LOG_W("power") << "manual restore preshutdown skip token revocation was not acknowledged";
+      } catch (...) {
+        UWF_LOG_W("power") << "manual restore preshutdown skip token revocation failed";
+      }
+    }
+    skipResult = ControlResult::NotApplicable;
+  };
+  const auto revokeSkip = qScopeGuard(revokeRestoreToken);
+  try {
+    if (m_uwfCapability != UwfCapability::Available) throw std::runtime_error(I18n::tr("UWF is not available").toStdString());
+    api::UwfFilter filter(m_session);
+    const auto filterRow = filter.read();
+    if (!filterRow.currentEnabled || !filterRow.nextEnabled)
+      throw std::runtime_error(I18n::tr("UWF must be enabled in both the current and next session").toStdString());
+    api::UwfOverlayConfig overlay(m_session);
+    const auto configs = overlay.readAll();
+    const bool currentDisk = std::any_of(configs.begin(), configs.end(), [](const auto& row) {
+      return row.currentSession && row.type == api::OverlayType::Disk;
+    });
+    const bool nextDisk = std::any_of(configs.begin(), configs.end(), [](const auto& row) {
+      return !row.currentSession && row.type == api::OverlayType::Disk;
+    });
+    if (!currentDisk || !nextDisk)
+      throw std::runtime_error(I18n::tr("Disk overlay must be configured in both the current and next session").toStdString());
+    const auto volumes = api::UwfVolume(m_session).readAll();
+    const bool currentProtected = std::any_of(volumes.begin(), volumes.end(), [](const auto& row) { return row.currentSession && row.isProtected; });
+    const bool nextProtected = std::any_of(volumes.begin(), volumes.end(), [](const auto& row) { return !row.currentSession && row.isProtected; });
+    if (!currentProtected || !nextProtected)
+      throw std::runtime_error(I18n::tr("A protected volume is required in both the current and next session").toStdString());
+
+    skipResult = m_preshutdown.markHandled ? m_preshutdown.markHandled() : ControlResult::NotApplicable;
+    if (skipResult == ControlResult::Unacknowledged)
+      throw std::runtime_error(I18n::tr("Enhanced mode did not confirm skipping file staging. Restore was not scheduled").toStdString());
+    resetAttempted = true;
+    const auto result = commands.execute(api::PersistentOverlayAction::Reset);
+    if (!result.succeeded()) throw std::runtime_error(result.output.toStdString());
+    UWF_LOG_I("power") << "persistent overlay reset command accepted; restarting without file staging";
+    filter.restartSystem(filterRow);
+    restartAccepted = true;
+    m_restoreBatch.emplace(std::move(*batch));
+  } catch (const std::exception& error) {
+    revokeRestoreToken();
+    QString detail = I18n::tr("Manual restore could not complete:\n%1").arg(QString::fromUtf8(error.what()));
+    if (resetAttempted) detail += "\n\n" + I18n::tr("A reset may already be scheduled for the next boot. Check the native configuration report and use Cancel scheduled reset if necessary.");
+    warning(m_dialogParent, I18n::tr("Manual restore"), detail);
+  } catch (...) {
+    revokeRestoreToken();
+    warning(m_dialogParent, I18n::tr("Manual restore"), I18n::tr("The operation failed with an unknown error. Check the native configuration report before restarting."));
+  }
+}
 
 void PowerController::executeDirectRestart() {
   if (m_actionActive) return;

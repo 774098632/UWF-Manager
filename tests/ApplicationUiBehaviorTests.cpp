@@ -394,6 +394,7 @@ class ApplicationUiBehaviorTests final : public QObject {
   void commitDispatcherConfirmsAndReportsARealFileThroughTheTransportBoundary();
   void commitDispatcherRoutesAnExistingRegistryValueThroughTheTransportBoundary();
   void safePowerActionsRequireConfirmationAndUseTheInjectedTransport();
+  void persistentRestoreSkipsStagingAndStopsOnFailure();
   void commitBatchUsesAuthoritativeExistenceForEveryOutcome();
   void uiUtilitiesPreserveDriveComboAndDirtySemantics();
   void mainWindowMountsFileStagingOnlyWherePerFileCommitIsSupported();
@@ -1803,6 +1804,82 @@ void ApplicationUiBehaviorTests::commitDispatcherRoutesAnExistingRegistryValueTh
   QCOMPARE(wmi.invocationInputs.size(), std::size_t{1});
   QCOMPARE(QString::fromStdString(wmi.invocationInputs.front().at("RegistryKey").toString()), key);
   QCOMPARE(QString::fromStdString(wmi.invocationInputs.front().at("ValueName").toString()), valueName);
+}
+
+void ApplicationUiBehaviorTests::persistentRestoreSkipsStagingAndStopsOnFailure() {
+  using ControlResult = ui::PowerControllerServices::PreshutdownControlResult;
+  for (int scenario = 0; scenario < 8; ++scenario) {
+    RecordingWmiOperations wmi;
+    wmi.queryResults.push_back({{{"__PATH", WmiValue::fromString("filter")},
+                                {"CurrentEnabled", WmiValue::fromBool(scenario != 5)},
+                                {"NextEnabled", WmiValue::fromBool(true)}}});
+    std::vector<WmiRow> overlays;
+    std::vector<WmiRow> volumes;
+    for (const bool current : {true, false}) {
+      overlays.push_back({{"__PATH", WmiValue::fromString(current ? "current-overlay" : "next-overlay")},
+                          {"CurrentSession", WmiValue::fromBool(current)},
+                          {"Type", WmiValue::fromUInt(scenario == 4 ? 0 : 1)},
+                          {"MaximumSize", WmiValue::fromUInt(4096)}});
+      volumes.push_back({{"__PATH", WmiValue::fromString(current ? "current-volume" : "next-volume")},
+                         {"CurrentSession", WmiValue::fromBool(current)}, {"DriveLetter", WmiValue::fromString("C:")},
+                         {"VolumeName", WmiValue::fromString("Volume{c}")}, {"BindByDriveLetter", WmiValue::fromBool(true)},
+                         {"CommitPending", WmiValue::fromBool(false)}, {"Protected", WmiValue::fromBool(scenario != 6)}});
+    }
+    wmi.queryResults.push_back(overlays);
+    wmi.queryResults.push_back(volumes);
+    if (scenario == 3) wmi.invocationFailure = std::make_exception_ptr(std::runtime_error("restart rejected"));
+    class RecordingCommands final : public api::PersistentOverlayCommands {
+     public:
+      QList<api::PersistentOverlayAction> calls;
+      bool failReset = false;
+      api::PersistentOverlayCommandResult execute(const api::PersistentOverlayAction action) override {
+        calls.append(action);
+        return {failReset ? 1 : 0, failReset ? QStringLiteral("reset rejected") : QStringLiteral("accepted")};
+      }
+    } commands;
+    commands.failReset = scenario == 1;
+    MemoryFileStagingStore store;
+    store.readFailure = QStringLiteral("must never read or commit staged files during restore");
+    ui::FileStagingCoordinator coordinator(wmi, store, UwfCapability::Available, nullptr);
+    int marks = 0;
+    int revocations = 0;
+    auto controller = std::make_unique<ui::PowerController>(ui::PowerControllerServices{wmi, store, UwfCapability::Available, coordinator,
+                                   {[&] {
+                                      ++marks;
+                                      return scenario == 2 ? ControlResult::Unacknowledged : ControlResult::Acknowledged;
+                                    }, [&] { ++revocations; return ControlResult::Acknowledged; }}}, nullptr);
+    bool firstDialog = true;
+    bool queuedRejected = false;
+    QTimer driver;
+    driver.setInterval(1);
+    connect(&driver, &QTimer::timeout, this, [&] {
+      auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+      if (!dialog) return;
+      if (firstDialog) {
+        firstDialog = false;
+        if (scenario == 7) { dialog->reject(); return; }
+        coordinator.requestCommit([&](const ui::FileStagingBatchResult& result) {
+          queuedRejected = result.command.outcome == app::ApplicationCommandOutcome::Rejected;
+        });
+      }
+      dialog->accept();
+    });
+    driver.start();
+    controller->restorePersistentOverlay(commands);
+    driver.stop();
+    QCOMPARE(coordinator.active(), scenario == 0);
+    controller.reset();
+    QCOMPARE(store.loads, 0);
+    QCOMPARE(store.writes, 0);
+    QVERIFY(!coordinator.active());
+    QCOMPARE(queuedRejected, scenario != 7);
+    QCOMPARE(commands.calls.size(), (scenario == 0 || scenario == 1 || scenario == 3) ? qsizetype{1} : qsizetype{0});
+    if (!commands.calls.isEmpty()) QCOMPARE(commands.calls.front(), api::PersistentOverlayAction::Reset);
+    QCOMPARE(marks, scenario <= 3 ? 1 : 0);
+    QCOMPARE(revocations, (scenario == 1 || scenario == 2 || scenario == 3) ? 1 : 0);
+    QCOMPARE(wmi.invocations.size(), (scenario == 0 || scenario == 3) ? std::size_t{1} : std::size_t{0});
+    if (!wmi.invocations.empty()) QCOMPARE(wmi.invocations.front(), QStringLiteral("RestartSystem"));
+  }
 }
 
 void ApplicationUiBehaviorTests::safePowerActionsRequireConfirmationAndUseTheInjectedTransport() {

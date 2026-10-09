@@ -74,7 +74,7 @@ StatusPanel::StatusPanel(QWidget* parent) : QWidget(parent) {
   m_protectCur->setTextFormat(Qt::RichText);  // 启用/停用状态走富文本（绿/红，见 enabledStateLabel）
   m_protectCur->setToolTip(I18n::tr("Protection state of this volume in the current session (read-only)."));
   m_protectNext = new SwitchButton();
-  m_protectNext->setToolTip(I18n::tr("Protect this volume in the next session. Writes to this volume are redirected to the overlay and discarded on reboot."));
+  m_protectNext->setToolTip(I18n::tr("Protect this volume in the next session. Writes go to the overlay. Reboot discards them unless persistent Disk overlay is enabled."));
 
   // 本次 / 下次保护状态各装进一张 mini 卡片，靠卡片边界把"当前生效值"和
   // "重启后才生效的目标值"分隔开，避免两者挨在一起被混淆。整行所有控件统一

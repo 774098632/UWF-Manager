@@ -1176,5 +1176,60 @@ Continue and discard them?</source><translation>还有 %1 个待应用变更尚�
     <message><source>Failed to enumerate registry keys: %1</source><translation>枚举注册表键失败：%1</translation></message>
     <message><source>Delete and commit failed</source><translation>删除并提交失败</translation></message>
     <message><source>Failed to resolve the volume for path %1: %2</source><translation>无法解析路径 %1 所在的卷：%2</translation></message>
+
+    <!-- Persistent overlay and manual restore -->
+    <message><source>The persistence enable command completed. Check the native report and restart to apply it.</source><translation>启用持久化命令已执行成功。请核对下方原生报告，重启后生效。</translation></message>
+    <message><source>The persistence disable command completed. Overlay changes will be discarded at the next restart.</source><translation>停用持久化命令已执行成功。覆盖层中的修改将在下次重启时丢弃。</translation></message>
+    <message><source>The reset command completed. Overlay changes will be discarded on the next boot. Safe restart or enhanced-mode staging may commit staged files before reset. Use Restore and restart to skip staging, or cancel this request before restarting.</source><translation>重置命令已执行成功。覆盖层中的修改将在下次启动时丢弃。「安全重启」或增强模式的暂存提交可能在重置前将暂存文件写入磁盘。请使用「恢复并重启」跳过暂存提交，或在重启前取消此次重置。</translation></message>
+    <message><source>The cancel-reset command completed. Check the native report before restarting.</source><translation>取消重置命令已执行成功。请在重启前核对下方原生报告。</translation></message>
+    <message><source>Persistent overlay / Restore</source><translation>持久覆盖层 / 恢复</translation></message>
+    <message><source>Persistent disk overlay preserves changes to protected volumes across normal restarts. Restore discards overlay changes on the next boot. Files and registry values already committed, or written through exclusions, remain on disk.</source><translation>持久磁盘覆盖层会在普通重启后保留对受保护卷的修改。恢复操作会在下次启动时丢弃覆盖层中的修改。已提交或通过排除项写入的文件和注册表值仍保留在磁盘上。</translation></message>
+    <message><source>Windows marks persistent overlay as experimental. It requires a Disk overlay and uses the configured overlay capacity. Changes accumulate between restarts; monitor free overlay space and restore before it fills up.</source><translation>Windows 将持久覆盖层标为实验性功能。它要求使用 Disk 覆盖层，并使用已配置的覆盖层容量。修改会跨重启累积，请监控覆盖层剩余空间，在用满之前执行恢复。</translation></message>
+    <message><source>Native Windows overlay configuration</source><translation>Windows 原生覆盖层配置</translation></message>
+    <message><source>Refresh status</source><translation>刷新状态</translation></message>
+    <message><source>Check persistence and any pending reset in the native report below.</source><translation>请在下方原生报告中核对持久化状态及待执行的重置请求。</translation></message>
+    <message><source>Enable persistent overlay</source><translation>启用持久覆盖层</translation></message>
+    <message><source>Disable persistent overlay</source><translation>停用持久覆盖层</translation></message>
+    <message><source>Reset on next boot</source><translation>下次启动时重置</translation></message>
+    <message><source>Cancel scheduled reset</source><translation>取消待执行的重置</translation></message>
+    <message><source>Restore and restart</source><translation>恢复并重启</translation></message>
+    <message><source>UWF is unavailable. Persistent overlay commands cannot be applied.</source><translation>UWF 不可用，无法应用持久覆盖层命令。</translation></message>
+    <message><source>Run UWF Manager as administrator to change persistent overlay settings.</source><translation>请以管理员身份运行 UWF 管理器，以修改持久覆盖层设置。</translation></message>
+    <message><source>Apply Disk as the next overlay type before enabling persistence. To change overlay type, disable UWF, apply and restart; then select Disk, apply, and enable protection for the next boot.</source><translation>启用持久化前，请先应用 Disk 作为下次会话的覆盖层类型。如需更改覆盖层类型，请先停用 UWF、应用并重启，再选择 Disk、应用，并启用下次启动的保护。</translation></message>
+    <message><source>Restore requires Disk overlay, UWF enabled, and at least one protected volume in both the current and next sessions. Apply the configuration and restart first.</source><translation>执行恢复要求当前会话和下次会话均使用 Disk 覆盖层、启用 UWF，并至少有一个受保护卷。请先应用配置并重启。</translation></message>
+    <message><source>Native configuration could not be read (exit code %1).</source><translation>无法读取原生配置（退出码 %1）。</translation></message>
+    <message><source>Native configuration could not be read:
+%1</source><translation>无法读取原生配置：
+%1</translation></message>
+    <message><source>Native configuration could not be read because of an unknown error.</source><translation>因未知错误无法读取原生配置。</translation></message>
+    <message><source>Disabling persistence discards overlay changes at the next restart. Files and registry values already committed, or written through exclusions, remain on disk. Continue?</source><translation>停用持久化将在下次重启时丢弃覆盖层中的修改。已提交或通过排除项写入的文件和注册表值仍保留在磁盘上。是否继续？</translation></message>
+    <message><source>Discard all changes in the protected-volume overlay on the next boot? Files and registry values already committed, or written through exclusions, remain on disk. Safe restart or enhanced-mode automatic staging may commit staged files before reset. Use Restore and restart to skip staging. You can cancel this reset before restarting.</source><translation>是否在下次启动时丢弃受保护卷覆盖层中的全部修改？已提交或通过排除项写入的文件和注册表值仍保留在磁盘上。「安全重启」或增强模式的自动暂存提交可能在重置前将暂存文件写入磁盘。请使用「恢复并重启」跳过暂存提交。您可以在重启前取消此次重置。</translation></message>
+    <message><source>Persistent overlay command failed (exit code %1).</source><translation>持久覆盖层命令执行失败（退出码 %1）。</translation></message>
+    <message><source>Persistent overlay command failed:
+%1</source><translation>持久覆盖层命令执行失败：
+%1</translation></message>
+    <message><source>Persistent overlay command failed because of an unknown error.</source><translation>持久覆盖层命令因未知错误执行失败。</translation></message>
+    <message><source>Manual restore</source><translation>手动恢复</translation></message>
+    <message><source>Wait for the active file staging or power operation to finish before restoring.</source><translation>请等待正在执行的文件暂存提交或电源操作完成后再恢复。</translation></message>
+    <message><source>Discard the persistent overlay and restart now?
+Uncommitted changes on protected volumes will be lost. Excluded paths and previously committed changes are not restored. File staging will be skipped. Save work on an unprotected volume first.</source><translation>是否立即丢弃持久覆盖层并重启？
+受保护卷上未提交的修改将丢失。排除路径和已提交的修改不会回退。本次操作将跳过文件暂存提交。请先将需要保留的工作保存到未受保护的卷。</translation></message>
+    <message><source>File staging was skipped because manual restore was selected.</source><translation>因选择手动恢复，本次操作已跳过文件暂存提交。</translation></message>
+    <message><source>Manual restore could not complete:
+%1</source><translation>无法完成手动恢复：
+%1</translation></message>
+    <message><source>A reset may already be scheduled for the next boot. Check the native configuration report and use Cancel scheduled reset if necessary.</source><translation>重置可能已经安排在下次启动时执行。请核对原生配置报告，必要时使用「取消待执行的重置」。</translation></message>
+    <message><source>The operation failed with an unknown error. Check the native configuration report before restarting.</source><translation>操作因未知错误失败。请在重启前核对原生配置报告。</translation></message>
+    <message><source>Keep overlay changes across normal restarts, and restore protected volumes when you choose.</source><translation>普通重启后保留覆盖层中的修改，需要时手动恢复受保护卷。</translation></message>
+
+    <!-- Persistent overlay and manual restore -->
+    <message><source>Enable the UWF filter in the next session. Writes go to the overlay. Reboot discards them unless persistent Disk overlay is enabled.</source><translation>下次会话启用 UWF 筛选器。写入会重定向到覆盖层。重启时会丢弃这些修改，启用持久 Disk 覆盖层后则保留。</translation></message>
+    <message><source>Overlay storage location. RAM consumes memory and is cleared on reboot. Disk uses the system drive and can preserve changes when persistence is enabled.</source><translation>覆盖层的存放位置。RAM 占用内存，重启后清空。Disk 存放在系统盘，启用持久化后可保留修改。</translation></message>
+    <message><source>Protect this volume in the next session. Writes go to the overlay. Reboot discards them unless persistent Disk overlay is enabled.</source><translation>下次会话保护本卷。写入会重定向到覆盖层。重启时会丢弃这些修改，启用持久 Disk 覆盖层后则保留。</translation></message>
+    <message><source>UWF must be enabled in both the current and next session</source><translation>当前会话和下次会话都必须启用 UWF</translation></message>
+    <message><source>Disk overlay must be configured in both the current and next session</source><translation>当前会话和下次会话都必须配置为 Disk 覆盖层</translation></message>
+    <message><source>A protected volume is required in both the current and next session</source><translation>当前会话和下次会话都必须至少有一个受保护卷</translation></message>
+    <message><source>Enhanced mode did not confirm skipping file staging. Restore was not scheduled</source><translation>增强模式未确认跳过文件暂存提交，尚未安排恢复</translation></message>
+    <message><source>The running enhanced mode service must be repaired or disabled before manual restore</source><translation>正在运行的增强模式服务必须先修复或停用，才能执行手动恢复</translation></message>
 </context>
 </TS>

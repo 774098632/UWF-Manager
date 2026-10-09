@@ -216,7 +216,7 @@ GlobalStatusPanel::GlobalStatusPanel(QWidget* parent) : QWidget(parent) {
   m_filterCur->setToolTip(I18n::tr("UWF filter state in the current session (read-only)."));
   m_filterNext = new SwitchButton();
   m_filterNext->setToolTip(
-      I18n::tr("Enable the UWF filter in the next session. Writes to protected volumes are redirected to the overlay and discarded on reboot."));
+      I18n::tr("Enable the UWF filter in the next session. Writes go to the overlay. Reboot discards them unless persistent Disk overlay is enabled."));
 
   // 本次 / 下次筛选状态各装进一张 mini 卡片，靠卡片边界把"当前生效值"和
   // "重启后才生效的目标值"分隔开，避免两者挨在一起被混淆。
@@ -270,7 +270,7 @@ GlobalStatusPanel::GlobalStatusPanel(QWidget* parent) : QWidget(parent) {
 
   m_overlayTypeNext = makeOverlayTypeCombo();
   m_overlayTypeNext->setToolTip(I18n::tr(
-      "Overlay storage location. RAM is faster but consumes memory; Disk uses the system drive and offers more capacity. Both are discarded on reboot."));
+      "Overlay storage location. RAM consumes memory and is cleared on reboot. Disk uses the system drive and can preserve changes when persistence is enabled."));
   m_typeLockedHint = makeLockedHint(lockTip);
   overlayGrid->addWidget(makeKey(I18n::tr("Type")), r, 0);
   overlayGrid->addWidget(wrapWithLockedHint(m_overlayTypeNext, m_typeLockedHint), r, 1, Qt::AlignRight);

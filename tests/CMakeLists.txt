@@ -10,6 +10,27 @@ function(uwf_add_test_resources target)
     )
 endfunction()
 
+qt_add_executable(UwfPersistentOverlayBehaviorTests
+        PersistentOverlayBehaviorTests.cpp
+        ../src/uwf/api/PersistentOverlayCommands.cpp
+)
+target_include_directories(UwfPersistentOverlayBehaviorTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(UwfPersistentOverlayBehaviorTests PRIVATE Qt6::Core Qt6::Test)
+uwf_configure_cpp_target(UwfPersistentOverlayBehaviorTests)
+add_test(NAME UwfPersistentOverlayBehaviorTests COMMAND UwfPersistentOverlayBehaviorTests)
+
+qt_add_executable(UwfPersistentOverlayDialogTests
+        PersistentOverlayDialogTests.cpp
+        ../src/ui/PersistentOverlayDialog.cpp
+        ../src/ui/Dialogs.cpp
+        ../src/ui/StatusBanner.cpp
+)
+target_include_directories(UwfPersistentOverlayDialogTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(UwfPersistentOverlayDialogTests PRIVATE UwfOverlayRuntime Qt6::Widgets Qt6::Test shell32)
+uwf_configure_cpp_target(UwfPersistentOverlayDialogTests)
+add_test(NAME UwfPersistentOverlayDialogTests COMMAND UwfPersistentOverlayDialogTests)
+set_tests_properties(UwfPersistentOverlayDialogTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 qt_add_executable(UwfHubLifecycleTests
         HubLifecycleTests.cpp
 )
@@ -119,6 +140,8 @@ endif ()
 # 不执行真实 commit、关机、重启或 Shell 写操作。
 qt_add_executable(UwfApplicationUiBehaviorTests
         ApplicationUiBehaviorTests.cpp
+        ../src/uwf/api/PersistentOverlayCommands.cpp
+        ../src/ui/PersistentOverlayDialog.cpp
         ../src/app/ApplicationCommand.cpp
         ../src/app/FileStagingCodec.cpp
         ../src/app/FileStagingConflictPolicy.cpp
@@ -190,7 +213,7 @@ qt_add_executable(UwfApplicationUiBehaviorTests
         ../src/uwf/wmi/WmiRowUtil.cpp
 )
 target_include_directories(UwfApplicationUiBehaviorTests PRIVATE "${PROJECT_SOURCE_DIR}/src" "${PROJECT_BINARY_DIR}/generated")
-target_link_libraries(UwfApplicationUiBehaviorTests PRIVATE UwfOverlayRuntime Qt6::Widgets Qt6::Svg Qt6::Test advapi32 dwmapi ole32 shell32 shcore user32
+target_link_libraries(UwfApplicationUiBehaviorTests PRIVATE UwfOverlayRuntime Qt6::Widgets Qt6::Svg Qt6::Network Qt6::Test advapi32 dwmapi ole32 shell32 shcore user32
         userenv wbemuuid wtsapi32)
 uwf_configure_cpp_target(UwfApplicationUiBehaviorTests)
 uwf_add_test_resources(UwfApplicationUiBehaviorTests)

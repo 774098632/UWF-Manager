@@ -1,5 +1,7 @@
 include_guard(GLOBAL)
 
+option(UWF_STATIC_RUNTIME "Statically link the compiler runtime for Clang/GCC builds" ON)
+
 function(uwf_configure_cpp_target target)
     set(_sanitize_enabled OFF)
     if (UWF_SANITIZE AND NOT MSVC)
@@ -51,7 +53,7 @@ function(uwf_configure_cpp_target target)
                 -fsanitize=address,undefined
                 -fuse-ld=lld
         )
-    else ()
+    elseif (UWF_STATIC_RUNTIME)
         target_link_options(${target} PRIVATE
                 -static
                 -static-libgcc
@@ -59,6 +61,8 @@ function(uwf_configure_cpp_target target)
                 -fuse-ld=lld
                 -Wl,-Bstatic
         )
+    else ()
+        target_link_options(${target} PRIVATE -fuse-ld=lld)
     endif ()
 endfunction()
 

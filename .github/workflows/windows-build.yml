@@ -1,0 +1,101 @@
+name: Windows portable build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          # docs points back to this repository; it is not a build dependency.
+          submodules: false
+
+      - name: Set up Windows compiler and Qt
+        id: msys2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-llvm
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-qt6-base
+            mingw-w64-clang-x86_64-qt6-svg
+            mingw-w64-clang-x86_64-qt6-tools
+
+      - name: Configure Release and test targets
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_COMPILER=clang++
+          -DUWF_SANITIZE=OFF
+          -DUWF_STATIC_RUNTIME=OFF
+          -DUWF_BUILD_TESTS=ON
+
+      - name: Build application and behavior tests
+        run: >-
+          cmake --build build --parallel 2 --target
+          UWF UwfCoreBehaviorTests UwfWmiApiBehaviorTests
+          UwfPersistentOverlayBehaviorTests UwfPersistentOverlayDialogTests
+          UwfApplicationUiBehaviorTests
+
+      - name: Run core, in-memory WMI and persistent overlay behavior tests
+        # These suites use in-memory WMI operations and do not change host UWF settings.
+        run: >-
+          ctest --test-dir build --output-on-failure --no-tests=error
+          --timeout 120 -R '^(UwfCoreBehaviorTests|UwfWmiApiBehaviorTests|UwfPersistentOverlayBehaviorTests|UwfPersistentOverlayDialogTests)$'
+
+      - name: Verify restore bypasses file staging and handles reset failure
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          ./build/tests/UwfApplicationUiBehaviorTests.exe persistentRestoreSkipsStagingAndStopsOnFailure
+          -o build/persistent-restore-results.txt,txt
+
+      - name: Package portable application and matching source
+        shell: pwsh
+        env:
+          UWF_MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: ./.github/scripts/package-windows.ps1 -Msys2Root $env:UWF_MSYS2_ROOT
+
+      - name: Upload portable build, source and checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: UWF-Manager-windows-x64-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: UWF-Manager-test-logs-${{ github.sha }}
+          path: |
+            build/Testing/Temporary/
+            build/persistent-restore-results.txt
+          if-no-files-found: ignore
+          retention-days: 14

@@ -119,6 +119,7 @@ class MainWindow : public QMainWindow {
   void showAbout();
   void showLogs();
   void showEnhancedMode();
+  void showPersistentOverlay();
   // 单文件 / 单目录提交：按 QFileInfo::isDir 自动分发——目录走 QDirIterator
   // 递归遍历挨个 CommitFile，文件直接 CommitFile。DiskTab.onCommitFile /
   // onCommitDir、ExclusionListWidget 右键 commit、覆盖层文件对话框右键 commit
@@ -189,6 +190,7 @@ class MainWindow : public QMainWindow {
   QAction* m_actPlan = nullptr;
   QAction* m_actShutdown = nullptr;
   QAction* m_actRestart = nullptr;
+  QAction* m_actPersistentOverlay = nullptr;
   QAction* m_actEnhancedMode = nullptr;
   QAction* m_actAbout = nullptr;
   QAction* m_actLog = nullptr;

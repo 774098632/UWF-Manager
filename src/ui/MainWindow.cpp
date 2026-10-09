@@ -67,6 +67,9 @@
 #include "OverlayPresentationController.h"
 #include "PendingCollect.h"
 #include "PowerController.h"
+#include <stdexcept>
+#include "PersistentOverlayDialog.h"
+#include "../uwf/api/PersistentOverlayCommands.h"
 #include "SystemInfoProvider.h"
 #include "ThemeManager.h"
 #include "TransientLabel.h"
@@ -139,7 +142,11 @@ MainWindow::MainWindow(MainWindowServices services, MainWindowStartup startup, Q
   using PreshutdownControlResult = PowerControllerServices::PreshutdownControlResult;
   PowerControllerServices::PreshutdownCommitControl preshutdown{
       [this] {
-        if (!m_enhancedModeStatus.serviceContractSatisfied() || !m_enhancedModeAgent) return PreshutdownControlResult::NotApplicable;
+        if (!m_enhancedModeManager) return PreshutdownControlResult::NotApplicable;
+        const auto status = m_enhancedModeManager->status();
+        applyEnhancedModeStatus(status);
+        if (!status.running) return PreshutdownControlResult::NotApplicable;
+        if (!status.serviceContractSatisfied() || !m_enhancedModeAgent) return PreshutdownControlResult::Unacknowledged;
         return m_enhancedModeAgent->markPreshutdownCommitHandled() ? PreshutdownControlResult::Acknowledged : PreshutdownControlResult::Unacknowledged;
       },
       [this] {
@@ -325,6 +332,11 @@ void MainWindow::buildUi() {
   m_actRestart = tb->addAction(I18n::tr("Safe restart"));
   m_actRestart->setToolTip(I18n::tr("Restart safely, even when the UWF overlay is full."));
   connect(m_actRestart, &QAction::triggered, m_power.get(), &PowerController::safeRestart);
+
+  m_actPersistentOverlay = tb->addAction(I18n::tr("Manual restore"));
+  m_actPersistentOverlay->setObjectName("manualRestoreAction");
+  m_actPersistentOverlay->setToolTip(I18n::tr("Keep overlay changes across normal restarts, and restore protected volumes when you choose."));
+  connect(m_actPersistentOverlay, &QAction::triggered, this, &MainWindow::showPersistentOverlay);
 
   if (m_enhancedModeManager) {
     m_actEnhancedMode = tb->addAction(I18n::tr("Enhanced mode"));
@@ -596,6 +608,7 @@ void MainWindow::rebuildUi() {
 
   // 重置所有指针成员；buildUi 会重新填充。
   m_actRefresh = m_actImport = m_actPlan = m_actShutdown = m_actRestart = nullptr;
+  m_actPersistentOverlay = nullptr;
   m_actEnhancedMode = nullptr;
   m_actLog = m_actAbout = m_actLang = m_actTheme = nullptr;
   m_tabs = nullptr;
@@ -922,6 +935,7 @@ void MainWindow::updateInteractionAvailability() {
   if (m_actRefresh) m_actRefresh->setEnabled(true);
   for (QAction* action : {m_actImport, m_actPlan})
     if (action) action->setEnabled(editable);
+  if (m_actPersistentOverlay) m_actPersistentOverlay->setEnabled(editable);
   for (QAction* action : {m_actShutdown, m_actRestart})
     if (action) action->setEnabled(elevated && m_snapshot.uwfAvailable);
   if (m_actEnhancedMode) m_actEnhancedMode->setEnabled(elevated);
@@ -951,13 +965,41 @@ void MainWindow::showInitialRefreshFailure(const std::string& reason) {
   // 首次读取失败没有旧数据可保留。只建立明确的不可用占位，并保留 Refresh
   // 作为恢复入口；写操作保持禁用。后续一旦成功，正常的提交路径会整体替换它。
   if (m_actRefresh) m_actRefresh->setEnabled(true);
-  for (QAction* action : {m_actImport, m_actPlan, m_actShutdown, m_actRestart})
+  for (QAction* action : {m_actImport, m_actPlan, m_actShutdown, m_actRestart, m_actPersistentOverlay})
     if (action) action->setEnabled(false);
   m_global->setUnavailable(reason.empty() ? I18n::tr("UWF namespace is not available") : QString::fromStdString(reason));
   m_global->setControlsEnabled(false);
   // Hub 与托盘尚无已提交快照，本来就保持未初始化状态。这里不能构造一个
   // uwfAvailable=false 的伪快照，否则会把“首次动态读取失败”冒充成“启动期
   // 已确认 UWF 未注册”。
+}
+
+void MainWindow::showPersistentOverlay() {
+  if (!configurationWritesAllowed() || !confirmDiscardPendingChanges()) return;
+  refresh();
+  if (!configurationWritesAllowed()) return;
+  api::NativePersistentOverlayCommands commands;
+  PersistentOverlayDialog dialog(commands, m_snapshot, this);
+  connect(&dialog, &PersistentOverlayDialog::configurationChanged, this, &MainWindow::reconcileAfterApply);
+  connect(&dialog, &PersistentOverlayDialog::restoreAndRestartRequested, this, [&] {
+    try {
+      // A running but incompatible helper could commit data independently of
+      // the UI. Read SCM status freshly rather than trusting the cached badge.
+      if (m_enhancedModeManager) {
+        const auto status = m_enhancedModeManager->status();
+        if (status.running && !status.serviceContractSatisfied()) {
+          throw std::runtime_error(I18n::tr("The running enhanced mode service must be repaired or disabled before manual restore").toStdString());
+        }
+        applyEnhancedModeStatus(status);
+      }
+      m_power->restorePersistentOverlay(commands);
+      refresh();
+    } catch (const std::exception& error) {
+      dialogs::warning(&dialog, I18n::tr("Manual restore"), QString::fromUtf8(error.what()));
+    }
+  });
+  dialog.exec();
+  refresh();
 }
 
 void MainWindow::showPlan() {

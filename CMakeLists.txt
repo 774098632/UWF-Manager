@@ -132,6 +132,8 @@ set(UWF_SOURCES
         src/uwf/api/UwfRegistryFilter.cpp
         src/uwf/api/UwfmgrCli.h
         src/uwf/api/UwfmgrCli.cpp
+        src/uwf/api/PersistentOverlayCommands.h
+        src/uwf/api/PersistentOverlayCommands.cpp
         src/uwf/UwfSnapshot.h
         src/uwf/UwfSnapshot.cpp
         src/uwf/FileStagingCommitter.h
@@ -184,6 +186,8 @@ set(UWF_SOURCES
         src/ui/UiTiming.h
         src/ui/PowerController.h
         src/ui/PowerController.cpp
+        src/ui/PersistentOverlayDialog.h
+        src/ui/PersistentOverlayDialog.cpp
         src/ui/MarqueeHintBox.h
         src/ui/MarqueeHintBox.cpp
         src/ui/LogViewerDialog.h

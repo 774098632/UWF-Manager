@@ -24,6 +24,7 @@
 #include "../uwf/UwfSnapshot.h"
 #include "../uwf/wmi/WmiClient.h"
 #include "FileStagingCoordinator.h"
+#include "../uwf/api/PersistentOverlayCommands.h"
 
 class QWidget;
 
@@ -61,11 +62,13 @@ class PowerController : public QObject {
   Q_OBJECT
  public:
   PowerController(PowerControllerServices services, QWidget* dialogParent, QObject* parent = nullptr);
+  ~PowerController() override;
 
  public slots:
   void safeShutdown();
   void safeRestart();
   void directRestart();
+  void restorePersistentOverlay(api::PersistentOverlayCommands& commands);
 
  private:
   void execute(PowerAction action);
@@ -83,6 +86,7 @@ class PowerController : public QObject {
   FileStagingCoordinator& m_stagingCoordinator;
   PowerControllerServices::PreshutdownCommitControl m_preshutdown;
   bool m_actionActive = false;
+  std::optional<FileStagingCoordinator::ExternalBatch> m_restoreBatch;
 };
 
 }  // namespace uwf::ui
