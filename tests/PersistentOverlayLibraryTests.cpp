@@ -114,6 +114,7 @@ class PersistentOverlayLibraryTests final : public QObject {
 
  private slots:
   void configurationReportsBothTypedSessionsAndSavedMode();
+  void disabledConfigurationReadsFlagsWithoutAControlDevice();
   void failedConfigurationReadStopsAtThatBoundary();
   void invalidActionCannotReachOperations();
   void persistencePrerequisitesRejectBeforeReading();
@@ -133,12 +134,26 @@ class PersistentOverlayLibraryTests final : public QObject {
 void PersistentOverlayLibraryTests::configurationReportsBothTypedSessionsAndSavedMode() {
   ScriptedOperations operations;
   operations.steps = {{Call::CurrentFlags, 2}, {Call::NextFlags, 0x80000004}, {Call::ReadReset, 255}};
-  const auto result = PersistentOverlayLibrary(operations).execute(PersistentOverlayAction::GetConfig, {});
+  const auto result = PersistentOverlayLibrary(operations).execute(PersistentOverlayAction::GetConfig, persistentContext());
   QVERIFY(result.succeeded());
   QVERIFY(result.output.contains(QStringLiteral("Current overlay flags: 0x00000002; persistent: ON; read-only media/HORM flag: OFF")));
   QVERIFY(result.output.contains(QStringLiteral("Next overlay flags: 0x80000004; persistent: OFF; read-only media/HORM flag: ON")));
   QVERIFY(result.output.contains(QStringLiteral("255 (saved mode)")));
   QVERIFY(operations.steps.isEmpty());
+  QCOMPARE(operations.writes, 0);
+}
+
+void PersistentOverlayLibraryTests::disabledConfigurationReadsFlagsWithoutAControlDevice() {
+  ScriptedOperations operations;
+  operations.steps = {{Call::CurrentFlags, 0x80}, {Call::NextFlags, 0x82}};
+  const auto result = PersistentOverlayLibrary(operations).execute(PersistentOverlayAction::GetConfig, persistenceChangeContext());
+  QVERIFY(result.succeeded());
+  QVERIFY(result.output.contains(QStringLiteral("Current overlay flags: 0x00000080; persistent: OFF")));
+  QVERIFY(result.output.contains(QStringLiteral("Next overlay flags: 0x00000082; persistent: ON")));
+  QVERIFY(result.output.contains(QStringLiteral("reset status: unavailable while current UWF is disabled")));
+  QVERIFY(!result.output.contains(QStringLiteral("reset mode:")));
+  QVERIFY(operations.steps.isEmpty());
+  QCOMPARE(operations.reads, 2);
   QCOMPARE(operations.writes, 0);
 }
 
@@ -148,7 +163,7 @@ void PersistentOverlayLibraryTests::failedConfigurationReadStopsAtThatBoundary()
     ScriptedOperations operations;
     operations.steps = reads;
     operations.steps[failedRead].status = kDenied;
-    const auto result = PersistentOverlayLibrary(operations).execute(PersistentOverlayAction::GetConfig, {});
+    const auto result = PersistentOverlayLibrary(operations).execute(PersistentOverlayAction::GetConfig, persistentContext());
     QVERIFY(!result.succeeded());
     QCOMPARE(result.exitCode, kDenied);
     QVERIFY(result.output.contains(QStringLiteral("0x80070005")));
@@ -158,7 +173,7 @@ void PersistentOverlayLibraryTests::failedConfigurationReadStopsAtThatBoundary()
   }
   ScriptedOperations operations;
   operations.steps = {{Call::CurrentFlags, 2}, {Call::NextFlags, 2}, {Call::ReadReset, 256}};
-  const auto result = PersistentOverlayLibrary(operations).execute(PersistentOverlayAction::GetConfig, {});
+  const auto result = PersistentOverlayLibrary(operations).execute(PersistentOverlayAction::GetConfig, persistentContext());
   QVERIFY(!result.succeeded());
   QCOMPARE(result.exitCode, kInvalidData);
   QVERIFY(result.output.contains(QStringLiteral("Unknown persistent overlay reset mode: 256")));
@@ -335,7 +350,7 @@ void PersistentOverlayLibraryTests::sFalseCannotSubstituteUninitializedValuesFor
     ScriptedOperations operations;
     operations.steps = configurationReads;
     operations.steps[failedRead].status = 1;
-    const auto result = PersistentOverlayLibrary(operations).execute(PersistentOverlayAction::GetConfig, {});
+    const auto result = PersistentOverlayLibrary(operations).execute(PersistentOverlayAction::GetConfig, persistentContext());
     QVERIFY(!result.succeeded());
     QCOMPARE(result.exitCode, 1);
     QCOMPARE(operations.reads, failedRead + 1);

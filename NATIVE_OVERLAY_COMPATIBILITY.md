@@ -73,14 +73,24 @@ they may enter a DISM feature-enable path. Before loading/calling them, the
 worker requires the same token to open the `uwfvol` service registry key with
 KEY_READ and find `System32\drivers\uwfvol.sys`. The native check uses a
 MAX_PATH buffer, so the application also refuses paths that exceed that limit.
-The DLL and driver files are held with FILE_SHARE_READ, and installation/device
+The DLL and driver files are held with FILE_SHARE_READ, and installation
 availability is checked immediately before every export. An absent or
 inaccessible installation fails instead of invoking an export to install it.
 
-The worker opens and holds `\\.\UwfvolControl` with GENERIC_READ | GENERIC_WRITE,
-FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL. Without
-this guard, GetReset can report zero for a missing device, and SetReset can
-normalize overlay type instead of scheduling a genuine reset.
+Before each reset get/set, the worker opens and holds `\\.\UwfvolControl` with
+GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING,
+FILE_ATTRIBUTE_NORMAL. Without this guard, GetReset can report zero for a
+missing device, and SetReset can normalize overlay type instead of scheduling
+a genuine reset.
+
+Flags get/set do not require this device. The matched volume driver's DriverEntry
+at `0x2d03c` skips device creation when global configuration UWFEnabled is zero;
+the mapping of that field to UWFEnabled is established by the runtime-driver
+reference. The DLL's management initialization at `0x17ae0` permits device-open
+failure, and flags get/set operate on configuration. When current WMI filter
+state is disabled, the report reads only flags and explicitly labels reset
+state unavailable. This permits initial persistence setup without treating a
+missing device as a confirmed zero reset mode.
 
 The wrapper's setup sends IOCTL `0x2249c3`; the matched volume driver dispatches
 it to `UwfrtlCfgApiBreakpoint`. In the Microsoft runtime-driver reference above,

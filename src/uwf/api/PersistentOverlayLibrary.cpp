@@ -79,10 +79,14 @@ PersistentOverlayCommandResult PersistentOverlayLibrary::execute(const Persisten
         if (const auto status = m_operations.getFlags(true, currentFlags); status != 0) return operationFailure(status, stage);
         stage = QStringLiteral("Get next overlay flags");
         if (const auto status = m_operations.getFlags(false, nextFlags); status != 0) return operationFailure(status, stage);
-        stage = QStringLiteral("Get persistent overlay reset mode");
-        if (const auto status = m_operations.getReset(resetMode); status != 0) return operationFailure(status, stage);
         const QString report = flagsReport(QStringLiteral("Current"), currentFlags) + QLatin1Char('\n') +
                                flagsReport(QStringLiteral("Next"), nextFlags) + QLatin1Char('\n');
+        // A disabled current session has no control device. Flags remain
+        // readable from configuration; reset state cannot be inferred as zero.
+        if (!context.currentEnabled)
+          return {0, report + QStringLiteral("Persistent overlay reset status: unavailable while current UWF is disabled."), false};
+        stage = QStringLiteral("Get persistent overlay reset mode");
+        if (const auto status = m_operations.getReset(resetMode); status != 0) return operationFailure(status, stage);
         if (!knownResetMode(resetMode))
           return failure(kInvalidData, report + QStringLiteral("Unknown persistent overlay reset mode: %1").arg(resetMode));
         return {0, report + resetReport(resetMode), false};

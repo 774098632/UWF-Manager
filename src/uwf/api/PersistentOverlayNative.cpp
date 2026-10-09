@@ -92,13 +92,6 @@ class AuditedOperations final : public PersistentOverlayLibraryOperations {
         (information.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)))
       throw std::runtime_error("The installed UWF driver file could not be held for verification. No native API was called.");
 
-    // Match the driver's own CDevice::Initialize access and sharing flags.
-    // GetReset otherwise treats a missing device as zero; SetReset can then
-    // change overlay type. Keep the device open for the whole operation.
-    m_device = CreateFileW(L"\\\\.\\UwfvolControl", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (m_device == INVALID_HANDLE_VALUE)
-      throw std::runtime_error("The UWF control device could not be opened. No native API was called.");
     m_module = LoadLibraryExW(libraryPath.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!m_module) throw std::runtime_error("The audited Windows UWF configuration library could not be loaded.");
     m_getFlags = resolve<GetFlags>("UwfCfgGetOverlayFlags");
@@ -118,6 +111,7 @@ class AuditedOperations final : public PersistentOverlayLibraryOperations {
   }
   std::int32_t getReset(std::uint32_t& value) override {
     verifyInstallation();
+    verifyControlDevice();
     DWORD native = 0;
     const HRESULT status = m_getReset(&native);
     if (status == S_OK) value = native;
@@ -129,6 +123,7 @@ class AuditedOperations final : public PersistentOverlayLibraryOperations {
   }
   std::int32_t setReset(const std::uint32_t value) override {
     verifyInstallation();
+    verifyControlDevice();
     return static_cast<std::int32_t>(m_setReset(value));
   }
 
@@ -145,7 +140,7 @@ class AuditedOperations final : public PersistentOverlayLibraryOperations {
   }
   void verifyInstallation() const {
     // Recheck immediately before each export; a prior successful read must not
-    // authorize a later call after installation/device availability changes.
+    // authorize a later call after installation availability changes.
     // The held driver file prevents replacement/deletion during this worker.
     HKEY serviceKey = nullptr;
     const LSTATUS opened = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\uwfvol", 0, KEY_READ, &serviceKey);
@@ -155,11 +150,17 @@ class AuditedOperations final : public PersistentOverlayLibraryOperations {
     const DWORD attributes = GetFileAttributesW(m_driverPath.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY))
       throw std::runtime_error("The UWF driver is no longer accessible. No further native API was called.");
+  }
+  void verifyControlDevice() {
+    // The disabled-filter boot path does not create this device. Flags get/set
+    // use configuration only, so requiring it would prevent initial setup.
+    // Reset get/set must have it: native missing-device fallbacks are misleading.
     const HANDLE probe = CreateFileW(L"\\\\.\\UwfvolControl", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (probe == INVALID_HANDLE_VALUE)
       throw std::runtime_error("The UWF control device is no longer accessible. No further native API was called.");
-    CloseHandle(probe);
+    if (m_device == INVALID_HANDLE_VALUE) m_device = probe;
+    else CloseHandle(probe);
   }
   void release() {
     if (m_module) { FreeLibrary(m_module); m_module = nullptr; }
