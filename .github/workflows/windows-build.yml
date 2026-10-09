@@ -96,6 +96,8 @@ jobs:
           name: UWF-Manager-test-logs-${{ github.sha }}
           path: |
             build/Testing/Temporary/
+            build/persistent-overlay-results.txt
+            build/persistent-overlay-dialog-results.txt
             build/persistent-restore-results.txt
           if-no-files-found: ignore
           retention-days: 14

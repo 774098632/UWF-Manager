@@ -741,8 +741,8 @@ Canceled by user; %1 entries not processed.</source>
 %1</translation>
     </message>
     <message><source>Automatic file staging stopped because of an unknown error.</source><translation>文件暂存因未知错误中止。</translation></message>
-    <message><source>Uncommitted changes will be lost</source><translation>尚未提交的更改将会丢失</translation></message>
-    <message><source>Before continuing, save your work and commit any changes that you want to keep permanently.</source><translation>继续前，请保存当前工作，并通过 UWF 提交需要永久保留的更改。</translation></message>
+    <message><source>Uncommitted changes may be lost</source><translation>尚未提交的更改可能丢失</translation></message>
+    <message><source>By default, reboot discards the overlay. Persistent Disk overlay keeps it unless a reset is scheduled. Save your work and commit changes that must survive a manual restore.</source><translation>默认情况下，重启会丢弃覆盖层。持久 Disk 覆盖层会保留修改，除非已安排重置。请保存当前工作，并提交需要在手动恢复后仍保留的更改。</translation></message>
     <message><source>Confirm direct restart?</source><translation>确认直接重启？</translation></message>
     <message><source>Confirm direct shutdown?</source><translation>确认直接关机？</translation></message>
     <message><source>The system will restart without committing files in File staging.</source><translation>系统将跳过文件暂存区的提交并直接重启。</translation></message>

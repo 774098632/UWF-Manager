@@ -279,14 +279,14 @@ PowerActionDialogOutcome runPowerActionDialog(QWidget* parent, PowerActionDialog
   auto* warningLayout = new QVBoxLayout(warningCard);
   warningLayout->setContentsMargins(14, 11, 14, 11);
   warningLayout->setSpacing(4);
-  auto* warningHeading = new QLabel(I18n::tr("Uncommitted changes will be lost"), warningCard);
+  auto* warningHeading = new QLabel(I18n::tr("Uncommitted changes may be lost"), warningCard);
   warningHeading->setObjectName(QStringLiteral("powerWarningHeading"));
   QFont warningFont = warningHeading->font();
   warningFont.setBold(true);
   warningHeading->setFont(warningFont);
   warningHeading->setStyleSheet(QStringLiteral("color: %1;").arg(theme.color(Sem::Danger).name()));
   warningLayout->addWidget(warningHeading);
-  auto* warningDetail = new QLabel(I18n::tr("Before continuing, save your work and commit any changes that you want to keep permanently."), warningCard);
+  auto* warningDetail = new QLabel(I18n::tr("By default, reboot discards the overlay. Persistent Disk overlay keeps it unless a reset is scheduled. Save your work and commit changes that must survive a manual restore."), warningCard);
   warningDetail->setObjectName(QStringLiteral("powerWarningDetail"));
   warningDetail->setWordWrap(true);
   warningLayout->addWidget(warningDetail);

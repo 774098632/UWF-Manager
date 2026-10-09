@@ -53,7 +53,7 @@ while ($queue.Count -gt 0) {
     if (-not $scanned.Add($file)) { continue }
     $headers = Invoke-Checked (Join-Path $bin 'llvm-objdump.exe') @('--private-headers', $file)
     foreach ($line in $headers) {
-        if ($line -notmatch '^\s*DLL Name:\s*(\S+)\s*$') { continue }
+        if ($line -cnotmatch '^\s*DLL Name:\s*(\S+)\s*$') { continue }
         $name = $Matches[1]
         $destination = Join-Path $bundle $name
         if (Test-Path -LiteralPath $destination) { continue }
@@ -74,7 +74,7 @@ foreach ($required in @('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Svg.d
 }
 # Ensure Qt always resolves its plugins inside this portable directory.
 "[Paths]`nPlugins=.`n" | Set-Content -LiteralPath (Join-Path $bundle 'qt.conf') -Encoding utf8
-Copy-Item -LiteralPath 'LICENSE', 'README.md', 'README.zh_CN.md' -Destination $bundle
+Copy-Item -LiteralPath 'LICENSE', 'README.md', 'README.zh_CN.md', 'MANUAL_RESTORE.zh_CN.md' -Destination $bundle
 
 # Preserve the package versions, licenses and exact source-package URLs for
 # redistributed Qt/compiler/third-party DLLs alongside the application GPL.

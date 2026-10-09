@@ -94,6 +94,11 @@ QString NativePersistentOverlayCommands::decodeOutput(const QByteArray& bytes) {
     encoding = QStringConverter::Utf16BE;
   if (!encoding) return decodeOemOutput(bytes);
 
+  // Qt's UTF-16 decoder replaces an odd trailing byte without setting
+  // hasError(), including in Stateless mode. Reject that truncation explicitly.
+  if ((*encoding == QStringConverter::Utf16LE || *encoding == QStringConverter::Utf16BE) && (bytes.size() & 1))
+    throw std::runtime_error("uwfmgr.exe output contains a truncated UTF-16 sequence");
+
   QStringDecoder decoder(*encoding, QStringConverter::Flag::Stateless);
   const QString output = decoder(bytes);
   if (decoder.hasError()) throw std::runtime_error("uwfmgr.exe output contains an invalid or truncated Unicode sequence");

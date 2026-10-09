@@ -17,7 +17,8 @@ qt_add_executable(UwfPersistentOverlayBehaviorTests
 target_include_directories(UwfPersistentOverlayBehaviorTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(UwfPersistentOverlayBehaviorTests PRIVATE Qt6::Core Qt6::Test)
 uwf_configure_cpp_target(UwfPersistentOverlayBehaviorTests)
-add_test(NAME UwfPersistentOverlayBehaviorTests COMMAND UwfPersistentOverlayBehaviorTests)
+add_test(NAME UwfPersistentOverlayBehaviorTests COMMAND UwfPersistentOverlayBehaviorTests
+        -o "${PROJECT_BINARY_DIR}/persistent-overlay-results.txt,txt")
 
 qt_add_executable(UwfPersistentOverlayDialogTests
         PersistentOverlayDialogTests.cpp
@@ -28,7 +29,8 @@ qt_add_executable(UwfPersistentOverlayDialogTests
 target_include_directories(UwfPersistentOverlayDialogTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(UwfPersistentOverlayDialogTests PRIVATE UwfOverlayRuntime Qt6::Widgets Qt6::Test shell32)
 uwf_configure_cpp_target(UwfPersistentOverlayDialogTests)
-add_test(NAME UwfPersistentOverlayDialogTests COMMAND UwfPersistentOverlayDialogTests)
+add_test(NAME UwfPersistentOverlayDialogTests COMMAND UwfPersistentOverlayDialogTests
+        -o "${PROJECT_BINARY_DIR}/persistent-overlay-dialog-results.txt,txt")
 set_tests_properties(UwfPersistentOverlayDialogTests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 qt_add_executable(UwfHubLifecycleTests
